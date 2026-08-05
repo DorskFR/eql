@@ -171,7 +171,12 @@
 	const stats = $derived(gear.data?.stats);
 	const attributes = $derived(stats ? gearPairs(stats, ATTRIBUTES) : []);
 	const resists = $derived(stats ? gearPairs(stats, RESISTS) : []);
-	const restricted = $derived(stats?.item_classes.filter((item) => item.classes.length) ?? []);
+	const restricted = $derived(
+		(stats?.item_classes.filter((item) => item.classes.length) ?? []).map((item, index) => ({
+			...item,
+			key: String(index)
+		}))
+	);
 
 	const signed = (value: number) => (value > 0 ? `+${value}` : String(value));
 
@@ -193,7 +198,10 @@
 				? 'No class-restricted items'
 				: `${needed} class${needed > 1 ? 'es' : ''} needed for this gear`;
 
-	const groups = $derived(groupEntries(inventory.data?.entries ?? []));
+	const keyedEntries = $derived(
+		(inventory.data?.entries ?? []).map((entry, index) => ({ ...entry, key: String(index) }))
+	);
+	const groups = $derived(groupEntries(keyedEntries));
 	const general = $derived(filled(groups.general));
 	const bank = $derived(filled(groups.bank));
 	const totals = $derived(equippedTotals(groups.equipped));
@@ -229,7 +237,7 @@
 		{ key: 'id', label: 'Item ID', align: 'right', sortable: true }
 	];
 
-	const rowKey = (entry: InventoryEntry) => `${entry.location}:${entry.id}`;
+	const rowKey = (entry: InventoryEntry & { key: string }) => entry.key;
 
 	const tabs: TabItem[] = $derived([
 		{ id: 'stats', label: 'Stats', icon: 'star' },
@@ -454,7 +462,7 @@
 					<DataTable
 						columns={classColumns}
 						rows={restricted}
-						rowKey={(row) => `${row.location}:${row.name}`}
+						rowKey={(row) => row.key}
 						empty="No class-restricted items."
 						stickyHeader
 					/>
