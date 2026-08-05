@@ -8,8 +8,12 @@ dir=${1:?usage: apply.sh <checkout-dir> [remote]}
 remote=${2:-$UPSTREAM_REMOTE}
 
 if [ ! -d "$dir/.git" ]; then
-    git clone --quiet --depth 1 --branch "$UPSTREAM_TAG" "$remote" "$dir"
+    git -c core.autocrlf=false -c core.eol=lf \
+        clone --quiet --depth 1 --branch "$UPSTREAM_TAG" "$remote" "$dir"
 fi
+
+git -C "$dir" config core.autocrlf false
+git -C "$dir" config core.eol lf
 
 at=$(git -C "$dir" rev-parse HEAD)
 if [ "$at" != "$UPSTREAM_COMMIT" ]; then
