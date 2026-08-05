@@ -119,6 +119,8 @@ pub struct Daemon {
     watched: Option<Watched>,
     runner: Option<crate::tools::Runner>,
     last_replay: Option<std::time::Instant>,
+    overlays: Option<crate::overlays::Supervisor>,
+    processes: crate::overlays::ProcessWatch,
 }
 
 impl Daemon {
@@ -130,18 +132,31 @@ impl Daemon {
         let state_path = config.state_path();
         let state = State::load(&state_path).map_err(DaemonError::State)?;
         let backoff = Backoff::new(config.poll_interval());
-        let runner = config
-            .tools
-            .log_reader
-            .enabled
-            .then(|| crate::tools::Runner::discover(config.tools.log_reader.exe.as_deref()))
+        let settings = &config.tools.log_reader;
+        let (wanted, refused) = crate::overlays::plan(&settings.overlays, settings.enabled);
+        for refusal in refused {
+            tracing::warn!(%refusal, "overlay not launched");
+        }
+
+        let asked_for = settings.enabled || !wanted.is_empty();
+        let installed = asked_for
+            .then(|| crate::tools::Runner::discover(settings.exe.as_deref()))
             .flatten();
-        if config.tools.log_reader.enabled && runner.is_none() {
+        if asked_for && installed.is_none() {
             tracing::warn!(
-                hint = crate::tools::install_hint(&config.tools.log_reader),
-                "log reader enabled but not found; harvest will stay empty"
+                hint = crate::tools::install_hint(settings),
+                harvest = settings.enabled,
+                overlays = ?wanted.iter().map(|o| o.name()).collect::<Vec<_>>(),
+                "log reader not found; nothing will be harvested and no overlay can start"
             );
         }
+        let runner = settings.enabled.then(|| installed.clone()).flatten();
+        let overlays = installed
+            .as_ref()
+            .filter(|_| !wanted.is_empty())
+            .map(|base| crate::overlays::Supervisor::new(base, &wanted))
+            .filter(|supervisor| !supervisor.is_empty());
+
         Ok(Self {
             config,
             client,
@@ -151,6 +166,8 @@ impl Daemon {
             watched: None,
             runner,
             last_replay: None,
+            overlays,
+            processes: crate::overlays::ProcessWatch::new(),
         })
     }
 
@@ -187,6 +204,33 @@ impl Daemon {
                 "log reader replay"
             );
         }
+    }
+
+    async fn supervise_overlays(&mut self, root: &Path) {
+        let Self {
+            overlays: Some(supervisor),
+            processes,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let running = processes.is_running(crate::overlays::GAME_PROCESS);
+        let log = running.then(|| logs::latest(root)).flatten();
+        supervisor.tick(running, log.as_deref()).await;
+    }
+
+    pub async fn shutdown(&mut self) {
+        if let Some(supervisor) = &mut self.overlays {
+            supervisor.stop().await;
+        }
+    }
+
+    pub fn overlays(&self) -> Vec<&'static str> {
+        self.overlays
+            .as_ref()
+            .map(crate::overlays::Supervisor::names)
+            .unwrap_or_default()
     }
 
     pub fn config(&self) -> &Config {
@@ -232,6 +276,7 @@ impl Daemon {
         dirty_state |= logs_dirty;
 
         self.run_replay(&root).await;
+        self.supervise_overlays(&root).await;
 
         let mut harvest_files = None;
         if let Some(dir) = self.config.harvest_dir() {

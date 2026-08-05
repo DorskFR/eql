@@ -29,6 +29,8 @@ pub struct LogReaderConfig {
     pub replay_secs: u64,
     #[serde(default = "default_replay_timeout_secs")]
     pub replay_timeout_secs: u64,
+    #[serde(default)]
+    pub overlays: Vec<String>,
 }
 
 impl LogReaderConfig {
@@ -281,6 +283,66 @@ mod tests {
             [api]
             url = "u"
             token = "t"
+            "#,
+        )
+        .unwrap();
+        assert!(!config.tools.log_reader.enabled);
+        assert_eq!(config.harvest_dir(), None);
+    }
+
+    #[test]
+    fn no_overlays_are_configured_by_default() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [tools.log_reader]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        assert!(config.tools.log_reader.overlays.is_empty());
+    }
+
+    #[test]
+    fn overlays_are_read_in_the_order_they_are_listed() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [tools.log_reader]
+            enabled = true
+            overlays = ["dps", "session_report"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.tools.log_reader.overlays, ["dps", "session_report"]);
+        assert_eq!(
+            crate::overlays::plan(&config.tools.log_reader.overlays, true).0,
+            vec![
+                crate::overlays::Overlay::Dps,
+                crate::overlays::Overlay::SessionReport
+            ]
+        );
+    }
+
+    #[test]
+    fn overlays_alone_do_not_switch_the_replay_harvest_on() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [tools.log_reader]
+            overlays = ["dps"]
             "#,
         )
         .unwrap();

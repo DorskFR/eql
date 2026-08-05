@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod harvest;
 pub mod install;
 pub mod logs;
+pub mod overlays;
 pub mod skin;
 pub mod state;
 pub mod tools;

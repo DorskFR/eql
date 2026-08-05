@@ -24,21 +24,56 @@ impl Runner {
         }
     }
 
-    pub fn args(&self, log: &Path) -> Vec<PathBuf> {
-        let mut args = Vec::new();
-        if let Runner::Source { script, .. } = self {
-            args.push(script.clone());
-        }
+    pub fn replay_args(&self, log: &Path) -> Vec<PathBuf> {
+        let mut args = self.leading_args();
         args.push(PathBuf::from("--replay"));
         args.push(log.to_path_buf());
         args
+    }
+
+    /// Every GUI tool takes the log path as its only argument; started without
+    /// one they pop a file-picker and hang waiting for a human.
+    pub fn overlay_args(&self, log: &Path) -> Vec<PathBuf> {
+        let mut args = self.leading_args();
+        args.push(log.to_path_buf());
+        args
+    }
+
+    fn leading_args(&self) -> Vec<PathBuf> {
+        match self {
+            Runner::Source { script, .. } => vec![script.clone()],
+            Runner::Frozen(_) => Vec::new(),
+        }
     }
 
     pub fn discover(explicit: Option<&Path>) -> Option<Self> {
         if let Some(path) = explicit {
             return Self::at(path);
         }
-        candidates().into_iter().find_map(|path| Self::at(&path))
+        candidates(ATLAS_STEM)
+            .into_iter()
+            .find_map(|path| Self::at(&path))
+    }
+
+    /// Upstream ships every tool of the suite in one directory.
+    pub fn sibling(&self, stem: &str) -> Option<Self> {
+        match self {
+            Runner::Frozen(exe) => {
+                let name = match exe.extension().and_then(|ext| ext.to_str()) {
+                    Some(ext) => format!("{stem}.{ext}"),
+                    None => stem.to_string(),
+                };
+                let path = exe.with_file_name(name);
+                path.is_file().then_some(Runner::Frozen(path))
+            }
+            Runner::Source { python, script } => {
+                let path = script.with_file_name(format!("{stem}.py"));
+                path.is_file().then(|| Runner::Source {
+                    python: python.clone(),
+                    script: path,
+                })
+            }
+        }
     }
 
     fn at(path: &Path) -> Option<Self> {
@@ -70,9 +105,9 @@ fn python() -> Option<PathBuf> {
     })
 }
 
-fn candidates() -> Vec<PathBuf> {
+fn candidates(stem: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let exe = format!("{ATLAS_STEM}{}", std::env::consts::EXE_SUFFIX);
+    let exe = format!("{stem}{}", std::env::consts::EXE_SUFFIX);
     if cfg!(windows) {
         for key in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
             if let Some(base) = std::env::var_os(key) {
@@ -86,7 +121,7 @@ fn candidates() -> Vec<PathBuf> {
     if let Some(data) = dirs::data_dir() {
         let base = data.join("eql-log-reader");
         out.push(base.join(&exe));
-        out.push(base.join(format!("{ATLAS_STEM}.py")));
+        out.push(base.join(format!("{stem}.py")));
     }
     out
 }
@@ -116,7 +151,7 @@ pub async fn replay(runner: &Runner, log: &Path, timeout: Duration) -> Result<()
     let started = Instant::now();
     let mut command = tokio::process::Command::new(runner.program());
     command
-        .args(runner.args(log))
+        .args(runner.replay_args(log))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -186,7 +221,7 @@ mod tests {
         let frozen = Runner::Frozen(PathBuf::from("/opt/eql/eql_atlas.exe"));
         assert_eq!(frozen.program(), Path::new("/opt/eql/eql_atlas.exe"));
         assert_eq!(
-            frozen.args(Path::new("/logs/eqlog_Dorsk_erudin.txt")),
+            frozen.replay_args(Path::new("/logs/eqlog_Dorsk_erudin.txt")),
             vec![
                 PathBuf::from("--replay"),
                 PathBuf::from("/logs/eqlog_Dorsk_erudin.txt")
@@ -199,7 +234,7 @@ mod tests {
         };
         assert_eq!(source.program(), Path::new("/usr/bin/python3"));
         assert_eq!(
-            source.args(Path::new("/logs/a.txt")),
+            source.replay_args(Path::new("/logs/a.txt")),
             vec![
                 PathBuf::from("/src/eql_atlas.py"),
                 PathBuf::from("--replay"),
@@ -207,6 +242,75 @@ mod tests {
             ],
             "the script comes before the flag"
         );
+    }
+
+    #[test]
+    fn an_overlay_is_handed_the_log_and_nothing_else() {
+        let frozen = Runner::Frozen(PathBuf::from("/opt/eql/eql_dps_meter.exe"));
+        assert_eq!(
+            frozen.overlay_args(Path::new("/logs/a.txt")),
+            vec![PathBuf::from("/logs/a.txt")]
+        );
+
+        let source = Runner::Source {
+            python: PathBuf::from("/usr/bin/python3"),
+            script: PathBuf::from("/src/eql_dps_meter.py"),
+        };
+        assert_eq!(
+            source.overlay_args(Path::new("/logs/a.txt")),
+            vec![
+                PathBuf::from("/src/eql_dps_meter.py"),
+                PathBuf::from("/logs/a.txt")
+            ]
+        );
+    }
+
+    #[test]
+    fn siblings_keep_the_shape_of_the_runner_that_found_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let atlas = dir.path().join("eql_atlas.exe");
+        std::fs::write(&atlas, b"").unwrap();
+        let meter = dir.path().join("eql_dps_meter.exe");
+        std::fs::write(&meter, b"").unwrap();
+
+        let frozen = Runner::Frozen(atlas.clone());
+        assert_eq!(frozen.sibling("eql_dps_meter"), Some(Runner::Frozen(meter)));
+        assert_eq!(
+            frozen.sibling("eql_friend_overlay"),
+            None,
+            "a tool that is not installed is not a runner"
+        );
+
+        let script = dir.path().join("eql_atlas.py");
+        std::fs::write(&script, b"").unwrap();
+        let report = dir.path().join("eql_session_report.py");
+        std::fs::write(&report, b"").unwrap();
+        let source = Runner::Source {
+            python: PathBuf::from("/usr/bin/python3"),
+            script,
+        };
+        assert_eq!(
+            source.sibling("eql_session_report"),
+            Some(Runner::Source {
+                python: PathBuf::from("/usr/bin/python3"),
+                script: report,
+            })
+        );
+        assert_eq!(
+            source.sibling("eql_dps_meter"),
+            None,
+            "the .exe is not a script"
+        );
+    }
+
+    #[test]
+    fn an_extensionless_runner_yields_extensionless_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("eql_atlas"), b"").unwrap();
+        let meter = dir.path().join("eql_dps_meter");
+        std::fs::write(&meter, b"").unwrap();
+        let frozen = Runner::Frozen(dir.path().join("eql_atlas"));
+        assert_eq!(frozen.sibling("eql_dps_meter"), Some(Runner::Frozen(meter)));
     }
 
     #[test]
