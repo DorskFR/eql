@@ -140,19 +140,19 @@ pub fn template_params(wikitext: &str, template: &str) -> Option<Vec<(String, St
         if i >= bytes.len() {
             return None;
         }
-        if body[i..].starts_with("{{") {
+        if bytes[i..].starts_with(b"{{") {
             brace += 1;
             i += 2;
-        } else if body[i..].starts_with("}}") {
+        } else if bytes[i..].starts_with(b"}}") {
             brace -= 1;
             if brace == 0 {
                 break i;
             }
             i += 2;
-        } else if body[i..].starts_with("[[") {
+        } else if bytes[i..].starts_with(b"[[") {
             link += 1;
             i += 2;
-        } else if body[i..].starts_with("]]") {
+        } else if bytes[i..].starts_with(b"]]") {
             link = (link - 1).max(0);
             i += 2;
         } else {
@@ -565,6 +565,14 @@ mod tests {
     fn parse(name: &str) -> ItemStats {
         let text = fixture(name);
         parse_item(&name.replace('_', " "), &text).expect("Itempage template")
+    }
+
+    #[test]
+    fn multibyte_chars_between_delimiters_do_not_panic() {
+        let text =
+            "{{Itempage|itemname=Test – Item|statsblock=WT: 0.5 – Size: SMALL|notes=café ×2}}";
+        let params = template_params(text, "Itempage").expect("params");
+        assert_eq!(params[0].1, "Test – Item");
     }
 
     #[test]
