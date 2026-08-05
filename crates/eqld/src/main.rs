@@ -50,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state = %daemon.state_path().display(),
         state_exists = daemon.state_path().exists(),
         harvest = %harvest,
+        overlays = ?daemon.overlays(),
         "eqld starting"
     );
 
@@ -63,5 +64,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = tokio::time::sleep(daemon.delay()) => {}
         }
     }
+    daemon.shutdown().await;
     Ok(())
 }

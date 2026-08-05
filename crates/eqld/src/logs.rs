@@ -47,6 +47,18 @@ pub fn scan(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+pub fn latest(root: &Path) -> Option<PathBuf> {
+    scan(root)
+        .ok()?
+        .into_iter()
+        .filter_map(|path| {
+            let mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
+            Some((mtime, path))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
+        .map(|(_, path)| path)
+}
+
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -227,6 +239,28 @@ mod tests {
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(found, ["eqlog_Dorsk_erudin.txt", "eqlog_Vala_erudin.txt"]);
+    }
+
+    #[test]
+    fn the_latest_log_is_the_one_most_recently_written() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(latest(dir.path()), None, "no Logs directory at all");
+
+        let logs = log_dir(dir.path());
+        std::fs::create_dir(&logs).unwrap();
+        assert_eq!(latest(dir.path()), None, "an empty Logs directory");
+
+        let old = logs.join("eqlog_Dorsk_erudin.txt");
+        std::fs::write(&old, "").unwrap();
+        std::fs::File::open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        let fresh = logs.join("eqlog_Vala_erudin.txt");
+        std::fs::write(&fresh, "").unwrap();
+        std::fs::write(logs.join("dbg.txt"), "").unwrap();
+
+        assert_eq!(latest(dir.path()), Some(fresh));
     }
 
     #[test]

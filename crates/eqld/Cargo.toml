@@ -18,6 +18,7 @@ toml = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 axum = "0.8"
