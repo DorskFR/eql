@@ -1,5 +1,6 @@
 mod app;
 mod scrape;
+mod stats;
 mod wiki;
 
 use app::AppState;

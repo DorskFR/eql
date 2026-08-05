@@ -1,4 +1,4 @@
-import type { InventoryEntry, ItemStats } from './api';
+import type { GearStats, InventoryEntry, ItemStats, WeaponSummary } from './api';
 
 export function itemPath(name: string): string {
 	return `/i/${encodeURIComponent(name)}`;
@@ -67,6 +67,26 @@ export function pairs(
 	return keys
 		.map(([key, label]) => ({ label, value: stats[key] as number | null }))
 		.filter((pair): pair is { label: string; value: number } => Boolean(pair.value));
+}
+
+export interface StatRow {
+	label: string;
+	value: number;
+}
+
+export function gearPairs(
+	stats: GearStats,
+	keys: readonly (readonly [keyof GearStats, string])[]
+): StatRow[] {
+	return keys.map(([key, label]) => ({ label, value: stats[key] as number }));
+}
+
+export function weaponRatio(weapon: WeaponSummary): string {
+	return weapon.ratio === null ? '—' : weapon.ratio.toFixed(2);
+}
+
+export function weaponDamageDelay(weapon: WeaponSummary): string {
+	return `${weapon.damage ?? '?'}/${weapon.delay ?? '?'}`;
 }
 
 export function flags(stats: ItemStats): string[] {
