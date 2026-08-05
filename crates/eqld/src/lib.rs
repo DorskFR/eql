@@ -1,6 +1,7 @@
 pub mod backoff;
 pub mod config;
 pub mod daemon;
+pub mod harvest;
 pub mod logs;
 pub mod skin;
 pub mod state;

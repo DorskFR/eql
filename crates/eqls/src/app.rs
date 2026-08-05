@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
 };
 use eql_core::{
-    api::{InventoryUpload, LogBatch, LogEventKind},
+    api::{HarvestDoc, InventoryUpload, LogBatch, LogEventKind, HARVEST_KINDS},
     inventory::InventoryEntry,
     layout::Layout,
 };
@@ -33,6 +33,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     let ingest = Router::new()
         .route("/api/v1/inventory", post(ingest))
         .route("/api/v1/events", post(ingest_events))
+        .route("/api/v1/harvest", post(ingest_harvest))
         .route(
             "/api/v1/layouts/{name}",
             put(put_layout).delete(delete_layout),
@@ -53,6 +54,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route(
             "/api/v1/characters/{server}/{name}/stats",
             get(character_stats),
+        )
+        .route(
+            "/api/v1/characters/{server}/{name}/harvest/{kind}",
+            get(get_harvest),
         )
         .route("/api/v1/items", get(search_items))
         .route("/api/v1/items/{key}", get(get_item))
@@ -258,6 +263,109 @@ fn payload_of(kind: &LogEventKind) -> serde_json::Value {
         object.remove("kind");
     }
     value
+}
+
+#[derive(Serialize)]
+struct HarvestAccepted {
+    character_id: i64,
+    kind: String,
+    #[serde(with = "time::serde::rfc3339")]
+    captured_at: OffsetDateTime,
+}
+
+/// One row per (character, kind): the companion app rewrites the whole file on
+/// every change, so older copies are strictly redundant.
+async fn ingest_harvest(
+    State(state): State<AppState>,
+    Json(upload): Json<HarvestDoc>,
+) -> Result<(StatusCode, Json<HarvestAccepted>), AppError> {
+    if upload.character.trim().is_empty() || upload.server.trim().is_empty() {
+        return Err(AppError::EmptyIdentity);
+    }
+    let kind = upload.kind.trim().to_lowercase();
+    if !HARVEST_KINDS.contains(&kind.as_str()) {
+        return Err(AppError::UnknownHarvestKind(upload.kind));
+    }
+    if upload.doc.is_null() {
+        return Err(AppError::EmptyHarvestDoc);
+    }
+    let captured_at = match upload.captured_at {
+        Some(secs) => {
+            OffsetDateTime::from_unix_timestamp(secs).map_err(|_| AppError::BadCapturedAt(secs))?
+        }
+        None => OffsetDateTime::now_utc(),
+    };
+
+    let mut tx = state.pool.begin().await?;
+    let character_id = upsert_character(&mut tx, &upload.character, &upload.server).await?;
+    sqlx::query(
+        "insert into harvest_docs (character_id, kind, captured_at, doc) values ($1, $2, $3, $4) \
+         on conflict (character_id, kind) do update set captured_at = excluded.captured_at, \
+             doc = excluded.doc, created_at = now()",
+    )
+    .bind(character_id)
+    .bind(&kind)
+    .bind(captured_at)
+    .bind(SqlJson(&upload.doc))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    tracing::info!(
+        character = %upload.character,
+        server = %upload.server,
+        %kind,
+        "stored harvest doc"
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(HarvestAccepted {
+            character_id,
+            kind,
+            captured_at,
+        }),
+    ))
+}
+
+#[derive(Serialize)]
+struct HarvestView {
+    character: String,
+    server: String,
+    kind: String,
+    #[serde(with = "time::serde::rfc3339")]
+    captured_at: OffsetDateTime,
+    doc: serde_json::Value,
+}
+
+async fn get_harvest(
+    State(state): State<AppState>,
+    Path((server, name, kind)): Path<(String, String, String)>,
+) -> Result<Json<HarvestView>, AppError> {
+    let kind = kind.trim().to_lowercase();
+    if !HARVEST_KINDS.contains(&kind.as_str()) {
+        return Err(AppError::UnknownHarvestKind(kind));
+    }
+    let row = sqlx::query(
+        "select c.name, c.server, h.kind, h.captured_at, h.doc \
+         from harvest_docs h \
+         join characters c on c.id = h.character_id \
+         where lower(c.server) = lower($1) and lower(c.name) = lower($2) and h.kind = $3",
+    )
+    .bind(&server)
+    .bind(&name)
+    .bind(&kind)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let doc: SqlJson<serde_json::Value> = row.try_get("doc")?;
+    Ok(Json(HarvestView {
+        character: row.try_get("name")?,
+        server: row.try_get("server")?,
+        kind: row.try_get("kind")?,
+        captured_at: row.try_get("captured_at")?,
+        doc: doc.0,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -766,6 +874,10 @@ enum AppError {
     EmptyEntries,
     #[error("log batch must contain at least one event")]
     EmptyEvents,
+    #[error("harvest doc must not be null")]
+    EmptyHarvestDoc,
+    #[error("unknown harvest kind {0}")]
+    UnknownHarvestKind(String),
     #[error("before={0} is not an rfc3339 timestamp")]
     BadCursor(String),
     #[error("captured_at {0} is not a valid unix timestamp")]
@@ -789,6 +901,8 @@ impl IntoResponse for AppError {
             AppError::EmptyIdentity
             | AppError::EmptyEntries
             | AppError::EmptyEvents
+            | AppError::EmptyHarvestDoc
+            | AppError::UnknownHarvestKind(_)
             | AppError::BadCapturedAt(_)
             | AppError::EmptyLayoutName
             | AppError::BadScreen(_, _)
@@ -1060,6 +1174,146 @@ mod tests {
         })
         .await;
         assert_eq!(unknown.as_array().unwrap().len(), 0);
+    }
+
+    fn post_harvest(token: Option<&str>, body: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/harvest")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    }
+
+    fn harvest_body(kind: &str, doc: &str) -> String {
+        format!(
+            r#"{{"character":"Dorsk","server":"erudin","kind":"{kind}",
+                 "captured_at":1754390000,"doc":{doc}}}"#
+        )
+    }
+
+    fn fixture(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/harvest")
+            .join(name);
+        std::fs::read_to_string(path).expect("fixture is committed")
+    }
+
+    #[tokio::test]
+    async fn harvest_writes_need_the_machine_token() {
+        let body = harvest_body("atlas", "{}");
+        assert_eq!(
+            status_of(post_harvest(None, &body)).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of(post_harvest(Some("wrong"), &body)).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn harvest_validates_before_touching_the_database() {
+        let cases = [
+            harvest_body("spellbook", "{}"),
+            harvest_body("atlas", "null"),
+            r#"{"character":" ","server":"erudin","kind":"atlas","doc":{}}"#.to_string(),
+        ];
+        for body in cases {
+            assert_eq!(
+                status_of(post_harvest(Some("s3cret"), &body)).await,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_harvest_kind_is_rejected_on_read() {
+        let request = Request::builder()
+            .uri("/api/v1/characters/erudin/Dorsk/harvest/spellbook")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(request).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn harvest_docs_upsert_latest_wins_and_read_back_per_kind() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+
+        let read = |kind: &str| {
+            Request::builder()
+                .uri(format!("/api/v1/characters/erudin/dorsk/harvest/{kind}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, _) = json_of(&app, read("atlas")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        for (kind, file) in [
+            ("atlas", "eql_atlas_Dorsk_erudin.json"),
+            ("quest", "eql_quest_Dorsk_erudin.json"),
+            ("alltime", "eql_alltime_Dorsk_erudin__WAR-CLR.json"),
+        ] {
+            let (status, accepted) = json_of(
+                &app,
+                post_harvest(Some("s3cret"), &harvest_body(kind, &fixture(file))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{kind}");
+            assert_eq!(accepted["kind"], kind);
+        }
+
+        let (status, atlas) = json_of(&app, read("atlas")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(atlas["character"], "Dorsk");
+        assert_eq!(atlas["server"], "erudin");
+        assert_eq!(atlas["captured_at"], "2025-08-05T10:33:20Z");
+        assert_eq!(atlas["doc"]["totals"]["kills"], 137);
+        assert_eq!(
+            atlas["doc"]["zones"]["befallen"]["mobs"]["a skeleton"]["kills"],
+            84
+        );
+
+        let (_, quest) = json_of(&app, read("quest")).await;
+        assert_eq!(quest["doc"]["current"], "1042");
+        let (_, alltime) = json_of(&app, read("alltime")).await;
+        assert_eq!(alltime["doc"]["source_dmg"]["melee"], 4_120_334);
+
+        let newer = r#"{"character":"Dorsk","server":"erudin","kind":"atlas",
+                        "captured_at":1754400000,"doc":{"format":1,"totals":{"kills":999}}}"#;
+        let (status, _) = json_of(&app, post_harvest(Some("s3cret"), newer)).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (_, replaced) = json_of(&app, read("atlas")).await;
+        assert_eq!(replaced["doc"]["totals"]["kills"], 999);
+        assert!(replaced["doc"]["zones"].is_null());
+        assert_eq!(replaced["captured_at"], "2025-08-05T13:20:00Z");
+
+        let rows: i64 = sqlx::query_scalar("select count(*) from harvest_docs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 3);
+        let characters: i64 = sqlx::query_scalar("select count(*) from characters")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(characters, 1);
+
+        let (status, _) = json_of(&app, {
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Nobody/harvest/atlas")
+                .body(Body::empty())
+                .unwrap()
+        })
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     fn layout_write(method: &str, uri: &str, token: Option<&str>, body: &str) -> Request<Body> {

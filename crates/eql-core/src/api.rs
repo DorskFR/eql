@@ -14,6 +14,20 @@ pub struct InventoryUpload {
     pub raw: Option<String>,
 }
 
+/// `doc` stays opaque: the third-party writer changes its schema freely, so
+/// nothing here may fail to parse. Projection happens in the UI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HarvestDoc {
+    pub character: String,
+    pub server: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<i64>,
+    pub doc: serde_json::Value,
+}
+
+pub const HARVEST_KINDS: [&str; 3] = ["atlas", "quest", "alltime"];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogBatch {
     pub character: String,
@@ -111,6 +125,39 @@ mod tests {
         assert_eq!(upload.captured_at, Some(1_754_390_000));
         assert_eq!(upload.entries[0].slots, 8);
         assert!(upload.raw.is_some());
+    }
+
+    #[test]
+    fn harvest_docs_keep_unknown_shapes_intact() {
+        let json = r#"{
+            "character": "Dorsk",
+            "server": "erudin",
+            "kind": "atlas",
+            "captured_at": 1754390000,
+            "doc": {"format": 1, "totals": {"kills": 3}, "future_field": [1, {"a": null}]}
+        }"#;
+        let harvest: HarvestDoc = serde_json::from_str(json).unwrap();
+        assert_eq!(harvest.kind, "atlas");
+        assert_eq!(harvest.captured_at, Some(1_754_390_000));
+        assert_eq!(harvest.doc["totals"]["kills"], 3);
+        assert_eq!(harvest.doc["future_field"][1]["a"], serde_json::Value::Null);
+        let round_tripped: HarvestDoc =
+            serde_json::from_str(&serde_json::to_string(&harvest).unwrap()).unwrap();
+        assert_eq!(round_tripped, harvest);
+    }
+
+    #[test]
+    fn harvest_docs_omit_an_absent_capture_time() {
+        let harvest = HarvestDoc {
+            character: "Dorsk".into(),
+            server: "erudin".into(),
+            kind: "quest".into(),
+            captured_at: None,
+            doc: serde_json::json!([]),
+        };
+        let json = serde_json::to_string(&harvest).unwrap();
+        assert!(!json.contains("captured_at"));
+        assert_eq!(serde_json::from_str::<HarvestDoc>(&json).unwrap(), harvest);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { createInfiniteQuery, createQuery } from '@tanstack/svelte-query';
-import { endpoints, type LogEvent } from './api';
+import { endpoints, type HarvestKind, type LogEvent } from './api';
 
 const REFETCH_MS = 30_000;
 const EVENT_PAGE = 100;
@@ -9,6 +9,8 @@ export const qk = {
 	inventory: (server: string, name: string) => ['inventory', server, name] as const,
 	stats: (server: string, name: string) => ['stats', server, name] as const,
 	events: (server: string, name: string) => ['events', server, name] as const,
+	harvest: (server: string, name: string, kind: HarvestKind) =>
+		['harvest', server, name, kind] as const,
 	item: (key: string) => ['item', key] as const,
 	layouts: ['layouts'] as const,
 	layout: (name: string) => ['layout', name] as const
@@ -44,6 +46,14 @@ export const useEvents = (server: () => string, name: () => string) =>
 		getNextPageParam: (last: LogEvent[]) =>
 			last.length < EVENT_PAGE ? undefined : last[last.length - 1].at,
 		refetchInterval: REFETCH_MS
+	}));
+
+export const useHarvest = (server: () => string, name: () => string, kind: HarvestKind) =>
+	createQuery(() => ({
+		queryKey: qk.harvest(server(), name(), kind),
+		queryFn: () => endpoints.harvest(server(), name(), kind),
+		refetchInterval: REFETCH_MS,
+		retry: false
 	}));
 
 export const useItem = (key: () => string) =>

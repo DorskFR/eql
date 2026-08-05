@@ -7,6 +7,8 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub state: StateConfig,
+    #[serde(default)]
+    pub harvest: HarvestConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,6 +28,13 @@ pub struct ApiConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StateConfig {
     pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HarvestConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub dir: Option<PathBuf>,
 }
 
 fn default_poll_secs() -> u64 {
@@ -53,6 +62,20 @@ impl Config {
 
     pub fn events_endpoint(&self) -> String {
         self.api_url("events")
+    }
+
+    pub fn harvest_endpoint(&self) -> String {
+        self.api_url("harvest")
+    }
+
+    pub fn harvest_dir(&self) -> Option<PathBuf> {
+        if !self.harvest.enabled {
+            return None;
+        }
+        self.harvest
+            .dir
+            .clone()
+            .or_else(crate::harvest::default_dir)
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -94,6 +117,8 @@ mod tests {
         assert_eq!(config.game.poll_secs, 5);
         assert_eq!(config.poll_interval().as_secs(), 5);
         assert!(config.state.path.is_none());
+        assert!(!config.harvest.enabled);
+        assert_eq!(config.harvest_dir(), None);
         assert_eq!(config.state_path(), default_state_path());
     }
 
@@ -119,6 +144,37 @@ mod tests {
             config.events_endpoint(),
             "http://localhost:8080/api/v1/events"
         );
+        assert_eq!(
+            config.harvest_endpoint(),
+            "http://localhost:8080/api/v1/harvest"
+        );
+    }
+
+    #[test]
+    fn harvest_stays_off_until_it_is_switched_on() {
+        let with = |harvest: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                [api]
+                url = "u"
+                token = "t"
+                {harvest}
+                "#
+            ))
+            .unwrap()
+        };
+        assert_eq!(with("[harvest]\nenabled = false").harvest_dir(), None);
+        assert_eq!(
+            with("[harvest]\nenabled = true\ndir = \"/tmp/reader\"").harvest_dir(),
+            Some(PathBuf::from("/tmp/reader"))
+        );
+        assert_eq!(
+            with("[harvest]\nenabled = true").harvest_dir(),
+            crate::harvest::default_dir()
+        );
+        assert_eq!(with("[harvest]\ndir = \"/tmp/reader\"").harvest_dir(), None);
     }
 
     #[test]

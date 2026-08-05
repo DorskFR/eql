@@ -162,6 +162,16 @@ export interface LogEvent {
 	payload: LogEventPayload;
 }
 
+export type HarvestKind = 'atlas' | 'quest' | 'alltime';
+
+export interface HarvestDoc {
+	character: string;
+	server: string;
+	kind: HarvestKind | string;
+	captured_at: string;
+	doc: unknown;
+}
+
 export type Rect = [number, number, number, number];
 
 export interface LayoutSummary {
@@ -251,6 +261,10 @@ export const endpoints = {
 			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/events?${query}`
 		);
 	},
+	harvest: (server: string, name: string, kind: HarvestKind) =>
+		get<HarvestDoc>(
+			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/harvest/${kind}`
+		),
 	itemSearch: (query: string) =>
 		get<ItemRecord[]>(`/api/v1/items?q=${encodeURIComponent(query)}`),
 	item: (key: string) => get<ItemRecord>(`/api/v1/items/${encodeURIComponent(key)}`),
