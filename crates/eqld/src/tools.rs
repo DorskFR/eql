@@ -3,12 +3,16 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-pub const REPO: &str = "blastlaster/eql-log-reader";
-pub const DEFAULT_VERSION: &str = "v2.0";
+/// Our releases carry the patched build (see `vendor/eql-log-reader`).
+pub const DEFAULT_REPO: &str = "DorskFR/eql";
+/// A sentinel, not a tag: our tags are eqld's, so there is nothing to pin.
+pub const DEFAULT_VERSION: &str = "latest";
 
-/// The Atlas is the only tool upstream exposes headlessly (`--replay`, no UI);
-/// the DPS meter and quest credit still need its GUI.
 pub const ATLAS_STEM: &str = "eql_atlas";
+
+/// The patched tool that keeps lifetime stats without ever opening a window;
+/// absent from a stock upstream install.
+pub const HEADLESS_STEM: &str = "eql_headless";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Runner {
@@ -200,13 +204,18 @@ pub fn asset_name(version: &str) -> Option<String> {
     }
 }
 
-pub fn release_api_url(version: &str) -> String {
-    format!("https://api.github.com/repos/{REPO}/releases/tags/{version}")
+pub fn release_api_url(repo: &str, version: &str) -> String {
+    if version == DEFAULT_VERSION {
+        format!("https://api.github.com/repos/{repo}/releases/latest")
+    } else {
+        format!("https://api.github.com/repos/{repo}/releases/tags/{version}")
+    }
 }
 
 pub fn install_hint(config: &LogReaderConfig) -> String {
     format!(
-        "run `eqld <config.toml> install-tools` (upstream {REPO} {})",
+        "run `eqld <config.toml> install-tools` ({} {})",
+        config.repo(),
         config.version()
     )
 }
@@ -349,10 +358,14 @@ mod tests {
     }
 
     #[test]
-    fn release_url_targets_the_pinned_tag() {
+    fn release_url_targets_the_pinned_tag_or_the_newest_release() {
         assert_eq!(
-            release_api_url("v2.0"),
+            release_api_url("blastlaster/eql-log-reader", "v2.0"),
             "https://api.github.com/repos/blastlaster/eql-log-reader/releases/tags/v2.0"
+        );
+        assert_eq!(
+            release_api_url(DEFAULT_REPO, DEFAULT_VERSION),
+            "https://api.github.com/repos/DorskFR/eql/releases/latest"
         );
     }
 

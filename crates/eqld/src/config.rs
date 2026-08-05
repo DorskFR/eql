@@ -24,6 +24,7 @@ pub struct LogReaderConfig {
     #[serde(default)]
     pub enabled: bool,
     pub exe: Option<PathBuf>,
+    pub repo: Option<String>,
     pub version: Option<String>,
     #[serde(default = "default_replay_secs")]
     pub replay_secs: u64,
@@ -31,7 +32,8 @@ pub struct LogReaderConfig {
     pub replay_timeout_secs: u64,
     #[serde(default)]
     pub overlays: Vec<String>,
-    /// A subset of `overlays`, launched on an isolated Windows desktop.
+    /// A subset of `overlays` that runs without a window: the headless build
+    /// where one exists, an isolated Windows desktop otherwise.
     #[serde(default)]
     pub hidden: Vec<String>,
     #[serde(default)]
@@ -51,6 +53,10 @@ pub enum AtlasMode {
 impl LogReaderConfig {
     pub fn replay_enabled(&self) -> bool {
         self.enabled && self.atlas == AtlasMode::Replay
+    }
+
+    pub fn repo(&self) -> &str {
+        self.repo.as_deref().unwrap_or(crate::tools::DEFAULT_REPO)
     }
 
     pub fn version(&self) -> &str {
@@ -346,6 +352,7 @@ mod tests {
         .unwrap();
         assert!(config.tools.log_reader.enabled);
         assert_eq!(config.harvest_dir(), crate::harvest::default_dir());
+        assert_eq!(config.tools.log_reader.repo(), crate::tools::DEFAULT_REPO);
         assert_eq!(
             config.tools.log_reader.version(),
             crate::tools::DEFAULT_VERSION
@@ -366,6 +373,7 @@ mod tests {
             [tools.log_reader]
             enabled = true
             exe = "/opt/eql/eql_atlas.exe"
+            repo = "blastlaster/eql-log-reader"
             version = "v2.0"
             replay_secs = 0
             replay_timeout_secs = 1
@@ -375,6 +383,11 @@ mod tests {
         assert_eq!(
             config.tools.log_reader.exe,
             Some(PathBuf::from("/opt/eql/eql_atlas.exe"))
+        );
+        assert_eq!(
+            config.tools.log_reader.repo(),
+            "blastlaster/eql-log-reader",
+            "a rig can still be pointed back at stock upstream"
         );
         assert_eq!(config.tools.log_reader.version(), "v2.0");
         assert_eq!(config.tools.log_reader.replay_interval().as_secs(), 10);

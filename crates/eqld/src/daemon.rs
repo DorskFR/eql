@@ -143,11 +143,19 @@ impl Daemon {
         for refusal in &plan.refused {
             tracing::warn!(%refusal, "overlay not launched");
         }
-        if !plan.hidden.is_empty() && !crate::overlays::hiding_is_supported() {
-            tracing::warn!(
-                hidden = ?plan.hidden.iter().map(|overlay| overlay.name()).collect::<Vec<_>>(),
-                "hiding an overlay needs windows; these will be launched normally"
-            );
+        if !crate::overlays::hiding_is_supported() {
+            let windowed: Vec<_> = plan
+                .hidden
+                .iter()
+                .filter(|overlay| overlay.headless_stem().is_none())
+                .map(|overlay| overlay.name())
+                .collect();
+            if !windowed.is_empty() {
+                tracing::warn!(
+                    hidden = ?windowed,
+                    "these overlays have no headless build and hiding one needs windows; they will be launched normally"
+                );
+            }
         }
 
         let asked_for = settings.enabled || !plan.wanted.is_empty();
@@ -347,6 +355,13 @@ impl Daemon {
         self.overlays
             .as_ref()
             .map(crate::overlays::Supervisor::hidden)
+            .unwrap_or_default()
+    }
+
+    pub fn headless_overlays(&self) -> Vec<&'static str> {
+        self.overlays
+            .as_ref()
+            .map(crate::overlays::Supervisor::headless)
             .unwrap_or_default()
     }
 

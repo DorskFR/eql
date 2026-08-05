@@ -13,6 +13,7 @@ Tickets live in the YouTrack `EQL` project.
 | `crates/eqld` | Daemon: watches game folder, uploads, installs skins |
 | `crates/eqls` | Server: ingest API, item DB, stat engine, web UI |
 | `fixtures/` | Sample game artifacts (skin XMLs, layout, ini) used by tests |
+| `vendor/eql-log-reader` | Our patch to upstream's log reader, and the commit it applies to |
 
 ```sh
 cargo test --workspace
@@ -31,18 +32,19 @@ token = "…"
 [tools.log_reader]
 enabled = true              # harvest headlessly via `eql_atlas --replay`
 overlays = ["dps"]          # in-game windows to launch alongside it
-hidden = ["dps"]            # …of which these never appear on screen
+hidden = ["dps"]            # …of which these run without a window
 ```
 
 | Key | Default | What |
 |---|---|---|
 | `enabled` | `false` | Ship the JSON the reader writes, and (in `atlas = "replay"`) run `eql_atlas --replay` each tick. |
 | `exe` | discovered | Path to `eql_atlas`; the other tools are found next to it. |
-| `version` | `v2.0` | Upstream release `install-tools` fetches. |
+| `repo` | `DorskFR/eql` | GitHub repo `install-tools` fetches the reader from. Set it to `blastlaster/eql-log-reader` for stock upstream. |
+| `version` | `latest` | Release of `repo` to fetch; a tag, or `latest` for its newest release. |
 | `replay_secs` | `120` | Seconds between replays (min 10). |
 | `replay_timeout_secs` | `600` | Kill a replay that outlives this (min 10). |
-| `overlays` | `[]` | GUI overlays to supervise: `dps`, `session_report`, `friend`, `atlas`. |
-| `hidden` | `[]` | Subset of `overlays` launched on an isolated desktop (Windows only). |
+| `overlays` | `[]` | Overlays to supervise: `dps`, `session_report`, `friend`, `atlas`. |
+| `hidden` | `[]` | Subset of `overlays` to run with no window. |
 | `atlas` | `"replay"` | Who keeps the Atlas database: `"replay"` or `"overlay"`. |
 
 ### Toggling without a restart
@@ -55,7 +57,7 @@ listed and still healthy is left alone rather than restarted.
 
 | Hot | Restart required |
 |---|---|
-| everything under `[tools.log_reader]`: `enabled`, `exe`, `version`, `replay_secs`, `replay_timeout_secs`, `overlays`, `hidden`, `atlas` | `game.root` |
+| everything under `[tools.log_reader]`: `enabled`, `exe`, `repo`, `version`, `replay_secs`, `replay_timeout_secs`, `overlays`, `hidden`, `atlas` | `game.root` |
 | everything under `[harvest]`: `enabled`, `dir` | `game.poll_secs` |
 | | `api.url`, `api.token` |
 | | `state.path` |
@@ -85,19 +87,38 @@ client is currently writing, are restarted with backoff if they die, and are
 stopped when the game exits or eqld shuts down. Switching character in-game
 repoints them at the new log.
 
+### The patched log reader
+
+Upstream's suite is five tkinter GUIs plus one headless entry point
+(`eql_atlas --replay`). We carry a small additive patch — `vendor/eql-log-reader`,
+applied in CI to upstream's pinned commit, published as assets on our own
+releases — that adds two console tools: `eql_headless`, the DPS meter's
+lifetime-stats layer with no window, and `eql_quest_cli`, which curates the
+tracked-quest list from the command line. `install-tools` fetches that build by
+default; `[tools.log_reader] repo` points back at upstream if you would rather
+have stock.
+
 ### Lifetime stats without a window on screen
 
-An overlay listed in `hidden` is launched on a desktop eqld creates for itself,
-so its window is never drawn while its parser ticks normally. Naming an overlay
-that is not in `overlays` is refused, and so is hiding `atlas`. On anything but
-Windows there are no desktops to hide behind: eqld warns once and launches it
-like any other overlay.
+An overlay listed in `hidden` runs with no window. For `dps` that means eqld
+launches `eql_headless` instead of the meter — a real console process, no
+window ever created, on every platform. The other overlays have no headless
+build, so eqld falls back to launching them on a desktop it creates for itself
+and that nothing renders; that trick is Windows-only, and elsewhere eqld warns
+once and launches them normally. A stock upstream install with no
+`eql_headless` next to `eql_atlas` falls back the same way. Naming an overlay
+that is not in `overlays` is refused, and so is hiding `atlas`.
 
 This is what makes `alltime` (the DPS meter's per-build lifetime stats) accrue
 at all — the meter only writes that file while it is running. **It never
 backfills.** At startup it snapshots a baseline and counts only what it sees
 live, so every minute the game runs without the meter is lost for good. Hide it
 and leave it running.
+
+Windows delivers no SIGTERM, so eqld starts `eql_headless` in its own process
+group and raises `CTRL_BREAK_EVENT` on it at shutdown, which runs its final
+save. If that cannot be delivered the store still autosaves every 15 seconds,
+so a hard kill costs at most that much.
 
 A character with two class builds writes one `alltime` file per build. The API
 keeps a single document per character and kind, so eqld merges them into one
@@ -108,11 +129,25 @@ before `/who` revealed the class combo has no build name and ships flat.
 
 `atlas = "replay"` (the default) runs the headless `--replay` tick and refuses
 the `atlas` overlay: the overlay autosaves its database and the two would fight.
-This mode writes **no quest data at all** — upstream's replay path never builds
-any quest state.
+With the patched reader this mode **does** keep quest progress — the replay
+credits looted items against the tracked quests and records hand-in dialogue,
+resuming from the same persisted byte offset the overlay uses, so nothing is
+credited twice.
+
+What no amount of patching gets you is *which* quests you are doing: the log
+records that you looted two Crushbone Belts, never that you mean to hand them
+in. Naming them is a one-off:
+
+```sh
+eql_atlas --quest <eqlog file> add "crushbone belt" --pick 1
+eql_atlas --quest <eqlog file> list
+```
+
+Until the first `add`, the tracked list is empty, upstream's save returns early
+and **no `eql_quest_*.json` exists at all**. That is the normal starting state,
+not a failure: eqld harvests whatever files are there and says nothing about
+the ones that are not.
 
 `atlas = "overlay"` is the other way round: the replay tick is skipped entirely
-and the Atlas overlay runs, keeping its own database live. This is the only way
-to get quest progress, and it needs you: the Atlas only credits quests you added
-by hand in its quest window, so the overlay must stay visible. eqld logs which
-mode is active at startup.
+and the Atlas overlay runs visibly, keeping its own database and giving you the
+quest window to curate in. eqld logs which mode is active at startup.

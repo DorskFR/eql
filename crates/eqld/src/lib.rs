@@ -1,5 +1,7 @@
 pub mod backoff;
 pub mod config;
+#[cfg(windows)]
+pub mod ctrl;
 pub mod daemon;
 pub mod harvest;
 #[cfg(windows)]

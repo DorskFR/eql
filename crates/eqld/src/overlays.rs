@@ -50,6 +50,15 @@ impl Overlay {
             Overlay::Atlas => crate::tools::ATLAS_STEM,
         }
     }
+
+    /// The tool that does this overlay's work with no window at all. Only the
+    /// DPS meter has one; the rest are windows and nothing else.
+    pub fn headless_stem(&self) -> Option<&'static str> {
+        match self {
+            Overlay::Dps => Some(crate::tools::HEADLESS_STEM),
+            Overlay::SessionReport | Overlay::Friend | Overlay::Atlas => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -67,8 +76,8 @@ pub enum Refusal {
     #[error("hidden overlay {0:?} is not in overlays; hidden must be a subset of overlays")]
     HiddenNotListed(String),
     #[error(
-        "the atlas overlay cannot be hidden: quests only accrue for the ones you add by hand \
-         in its quest window, so it runs visible"
+        "the atlas overlay has no headless build to run instead, and hidden it is only a map \
+         nobody can read; track quests with `eql_atlas --quest <log> add` instead"
     )]
     AtlasNotHideable,
 }
@@ -125,15 +134,26 @@ pub fn hiding_is_supported() -> bool {
 
 pub fn atlas_mode_note(mode: AtlasMode) -> &'static str {
     match mode {
-        AtlasMode::Replay => "the --replay tick keeps the atlas database; no quest data is written",
+        AtlasMode::Replay => {
+            "the --replay tick keeps the atlas database and credits the quests already tracked"
+        }
         AtlasMode::Overlay => {
             "the atlas overlay keeps its own database; quests accrue for the ones you track in it"
         }
     }
 }
 
+/// How long a headless tool gets to run its final save after the console break
+/// before it is killed outright.
+#[cfg(windows)]
+const BREAK_GRACE: Duration = Duration::from_secs(10);
+
 enum Handle {
-    Child(Box<tokio::process::Child>),
+    Child {
+        child: Box<tokio::process::Child>,
+        /// Its own process group, so it can be sent a console break.
+        group: bool,
+    },
     #[cfg(windows)]
     Hidden(crate::hidden::Process),
 }
@@ -141,7 +161,7 @@ enum Handle {
 impl Handle {
     fn id(&self) -> Option<u32> {
         match self {
-            Handle::Child(child) => child.id(),
+            Handle::Child { child, .. } => child.id(),
             #[cfg(windows)]
             Handle::Hidden(process) => Some(process.id()),
         }
@@ -151,7 +171,7 @@ impl Handle {
     /// absent when a signal took it.
     fn try_wait(&mut self) -> std::io::Result<Option<Option<i32>>> {
         match self {
-            Handle::Child(child) => Ok(child.try_wait()?.map(|status| status.code())),
+            Handle::Child { child, .. } => Ok(child.try_wait()?.map(|status| status.code())),
             #[cfg(windows)]
             Handle::Hidden(process) => Ok(process.try_wait()?.map(Some)),
         }
@@ -159,7 +179,35 @@ impl Handle {
 
     async fn stop(&mut self) {
         match self {
-            Handle::Child(child) => {
+            #[cfg_attr(not(windows), allow(unused_variables))]
+            Handle::Child { child, group } => {
+                #[cfg(windows)]
+                if *group {
+                    if let Some(pid) = child.id() {
+                        match tokio::task::spawn_blocking(move || crate::ctrl::break_group(pid))
+                            .await
+                        {
+                            Ok(Ok(())) => {
+                                if tokio::time::timeout(BREAK_GRACE, child.wait())
+                                    .await
+                                    .is_ok()
+                                {
+                                    return;
+                                }
+                                tracing::warn!(
+                                    pid,
+                                    "the headless tool is still saving, killing it"
+                                );
+                            }
+                            Ok(Err(err)) => tracing::warn!(
+                                pid,
+                                %err,
+                                "cannot raise a console break, the last stats are lost"
+                            ),
+                            Err(err) => tracing::warn!(pid, %err, "console break task failed"),
+                        }
+                    }
+                }
                 let _ = child.start_kill();
                 let _ = child.wait().await;
             }
@@ -178,17 +226,19 @@ struct Entry {
     overlay: Overlay,
     runner: Runner,
     hidden: bool,
+    headless: bool,
     running: Option<Running>,
     backoff: Backoff,
     retry_at: Option<Instant>,
 }
 
 impl Entry {
-    fn new(overlay: Overlay, runner: Runner, hidden: bool) -> Self {
+    fn new(overlay: Overlay, (runner, headless): (Runner, bool), hidden: bool) -> Self {
         Self {
             overlay,
             runner,
             hidden,
+            headless,
             running: None,
             backoff: Backoff::with_max(RESTART_BASE, crate::backoff::MAX_BACKOFF),
             retry_at: None,
@@ -233,12 +283,18 @@ impl Entry {
             return;
         }
         self.retry_at = None;
-        match spawn(&self.runner, log, self.hidden) {
+        match spawn(
+            &self.runner,
+            log,
+            self.hidden && !self.headless,
+            self.headless,
+        ) {
             Ok(child) => {
                 tracing::info!(
                     overlay = self.overlay.name(),
                     pid = child.id(),
-                    hidden = self.hidden && hiding_is_supported(),
+                    hidden = self.hidden && (self.headless || hiding_is_supported()),
+                    headless = self.headless,
                     log = %log.display(),
                     "overlay started"
                 );
@@ -269,15 +325,23 @@ impl Entry {
     }
 }
 
-fn spawn(runner: &Runner, log: &Path, hidden: bool) -> std::io::Result<Handle> {
+/// `headless` gets its own process group: Windows delivers no SIGTERM, so the
+/// only way to let the tool run its final save is a console break, and that is
+/// addressed to a group.
+fn spawn(
+    runner: &Runner,
+    log: &Path,
+    hidden_desktop: bool,
+    headless: bool,
+) -> std::io::Result<Handle> {
     let args = runner.overlay_args(log);
     let dir = runner.program().parent();
     #[cfg(windows)]
-    if hidden {
+    if hidden_desktop {
         return crate::hidden::spawn(runner.program(), &args, dir).map(Handle::Hidden);
     }
     #[cfg(not(windows))]
-    let _ = hidden;
+    let _ = hidden_desktop;
     let mut command = tokio::process::Command::new(runner.program());
     command
         .args(args)
@@ -287,7 +351,27 @@ fn spawn(runner: &Runner, log: &Path, hidden: bool) -> std::io::Result<Handle> {
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
-    command.spawn().map(|child| Handle::Child(Box::new(child)))
+    #[cfg(windows)]
+    if headless {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    command.spawn().map(|child| Handle::Child {
+        child: Box::new(child),
+        group: headless,
+    })
+}
+
+/// A hidden overlay prefers the tool that opens no window at all; an install
+/// without it (stock upstream) falls back to the isolated desktop.
+fn resolve(base: &Runner, overlay: Overlay, hidden: bool) -> Option<(Runner, bool)> {
+    if hidden {
+        if let Some(runner) = overlay.headless_stem().and_then(|stem| base.sibling(stem)) {
+            return Some((runner, true));
+        }
+    }
+    base.sibling(overlay.stem()).map(|runner| (runner, false))
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -317,10 +401,9 @@ impl Supervisor {
     pub fn new(base: &Runner, overlays: &[Overlay], hidden: &[Overlay]) -> Self {
         let mut entries = Vec::new();
         for overlay in overlays {
-            match base.sibling(overlay.stem()) {
-                Some(runner) => {
-                    entries.push(Entry::new(*overlay, runner, hidden.contains(overlay)))
-                }
+            let hide = hidden.contains(overlay);
+            match resolve(base, *overlay, hide) {
+                Some(found) => entries.push(Entry::new(*overlay, found, hide)),
                 None => tracing::warn!(
                     overlay = overlay.name(),
                     expected = overlay.stem(),
@@ -358,20 +441,33 @@ impl Supervisor {
                     if entry.hidden != hide {
                         entry.stop().await;
                         entry.hidden = hide;
+                        if let Some((runner, headless)) =
+                            base.and_then(|base| resolve(base, *overlay, hide))
+                        {
+                            entry.runner = runner;
+                            entry.headless = headless;
+                        }
                         changes.moved.push(overlay.name());
                         tracing::info!(
                             overlay = overlay.name(),
-                            hidden = hide && hiding_is_supported(),
-                            "overlay moved desktops, relaunching"
+                            hidden = hide,
+                            headless = entry.headless,
+                            "overlay changed how it runs, relaunching"
                         );
                     }
                     kept.push(entry);
                 }
-                None => match base.and_then(|base| base.sibling(overlay.stem())) {
-                    Some(runner) => {
-                        kept.push(Entry::new(*overlay, runner, hide));
+                None => match base.and_then(|base| resolve(base, *overlay, hide)) {
+                    Some(found) => {
+                        let headless = found.1;
+                        kept.push(Entry::new(*overlay, found, hide));
                         changes.enabled.push(overlay.name());
-                        tracing::info!(overlay = overlay.name(), hidden = hide, "overlay enabled");
+                        tracing::info!(
+                            overlay = overlay.name(),
+                            hidden = hide,
+                            headless,
+                            "overlay enabled"
+                        );
                     }
                     None => {
                         changes.missing.push(overlay.name());
@@ -407,6 +503,14 @@ impl Supervisor {
         self.entries
             .iter()
             .filter(|entry| entry.hidden)
+            .map(|entry| entry.overlay.name())
+            .collect()
+    }
+
+    pub fn headless(&self) -> Vec<&'static str> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.headless)
             .map(|entry| entry.overlay.name())
             .collect()
     }
@@ -635,6 +739,109 @@ mod tests {
     }
 
     #[test]
+    fn only_the_dps_meter_can_run_without_a_window_of_its_own() {
+        assert_eq!(Overlay::Dps.headless_stem(), Some("eql_headless"));
+        for overlay in [Overlay::SessionReport, Overlay::Friend, Overlay::Atlas] {
+            assert_eq!(
+                overlay.headless_stem(),
+                None,
+                "{} is a window and nothing else, so it still needs a desktop to hide on",
+                overlay.name()
+            );
+        }
+    }
+
+    fn suite_with(dir: &Path, stems: &[&str]) -> Runner {
+        for stem in stems {
+            std::fs::write(dir.join(format!("{stem}.exe")), b"").unwrap();
+        }
+        Runner::Frozen(dir.join("eql_atlas.exe"))
+    }
+
+    #[test]
+    fn a_hidden_dps_runs_the_headless_tool_instead_of_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = suite_with(
+            dir.path(),
+            &[
+                "eql_atlas",
+                "eql_dps_meter",
+                "eql_headless",
+                "eql_friend_overlay",
+            ],
+        );
+
+        let supervisor = Supervisor::new(&base, &[Overlay::Dps, Overlay::Friend], &[Overlay::Dps]);
+        assert_eq!(supervisor.headless(), vec!["dps"]);
+        assert_eq!(supervisor.hidden(), vec!["dps"]);
+        assert_eq!(
+            supervisor.entries[0].runner.program(),
+            dir.path().join("eql_headless.exe")
+        );
+        assert_eq!(
+            supervisor.entries[1].runner.program(),
+            dir.path().join("eql_friend_overlay.exe"),
+            "an overlay that is not hidden is untouched"
+        );
+    }
+
+    #[test]
+    fn a_visible_dps_is_the_window_even_where_the_headless_tool_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = suite_with(dir.path(), &["eql_atlas", "eql_dps_meter", "eql_headless"]);
+        let supervisor = Supervisor::new(&base, &[Overlay::Dps], &[]);
+        assert!(supervisor.headless().is_empty());
+        assert_eq!(
+            supervisor.entries[0].runner.program(),
+            dir.path().join("eql_dps_meter.exe")
+        );
+    }
+
+    #[test]
+    fn a_stock_upstream_install_still_hides_the_meter_on_a_desktop() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = suite_with(dir.path(), &["eql_atlas", "eql_dps_meter"]);
+        let supervisor = Supervisor::new(&base, &[Overlay::Dps], &[Overlay::Dps]);
+        assert_eq!(supervisor.hidden(), vec!["dps"]);
+        assert!(
+            supervisor.headless().is_empty(),
+            "there is no eql_headless to run"
+        );
+        assert_eq!(
+            supervisor.entries[0].runner.program(),
+            dir.path().join("eql_dps_meter.exe")
+        );
+    }
+
+    #[tokio::test]
+    async fn hiding_a_running_meter_swaps_it_for_the_headless_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = suite_with(dir.path(), &["eql_atlas", "eql_dps_meter", "eql_headless"]);
+
+        let mut supervisor = Supervisor::new(&base, &[Overlay::Dps], &[]);
+        let changes = supervisor
+            .reconcile(Some(&base), &[Overlay::Dps], &[Overlay::Dps])
+            .await;
+        assert_eq!(changes.moved, vec!["dps"]);
+        assert_eq!(supervisor.headless(), vec!["dps"]);
+        assert_eq!(
+            supervisor.entries[0].runner.program(),
+            dir.path().join("eql_headless.exe")
+        );
+
+        let changes = supervisor
+            .reconcile(Some(&base), &[Overlay::Dps], &[])
+            .await;
+        assert_eq!(changes.moved, vec!["dps"]);
+        assert!(supervisor.headless().is_empty());
+        assert_eq!(
+            supervisor.entries[0].runner.program(),
+            dir.path().join("eql_dps_meter.exe"),
+            "unhiding it brings the window back"
+        );
+    }
+
+    #[test]
     fn a_process_is_found_by_name_and_a_made_up_one_is_not() {
         let pid = sysinfo::get_current_pid().unwrap();
         let mut system = sysinfo::System::new();
@@ -669,14 +876,14 @@ mod tests {
 
         fn supervisor(runner: Runner) -> Supervisor {
             Supervisor {
-                entries: vec![Entry::new(Overlay::Dps, runner, false)],
+                entries: vec![Entry::new(Overlay::Dps, (runner, false), false)],
                 watching: None,
             }
         }
 
         async fn wait(supervisor: &mut Supervisor) {
             match &mut supervisor.entries[0].running.as_mut().unwrap().child {
-                Handle::Child(child) => {
+                Handle::Child { child, .. } => {
                     child.wait().await.unwrap();
                 }
             }
@@ -694,7 +901,7 @@ mod tests {
                 &format!("echo \"$1\" >> {}", seen.display()),
             );
             let mut supervisor = Supervisor {
-                entries: vec![Entry::new(Overlay::Dps, runner, true)],
+                entries: vec![Entry::new(Overlay::Dps, (runner, true), true)],
                 watching: None,
             };
             assert_eq!(supervisor.hidden(), vec!["dps"]);
