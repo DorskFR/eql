@@ -1,3 +1,7 @@
+use crate::{
+    stats::{derive_gear_stats, is_equipped_location, GearStats},
+    wiki::ItemStats,
+};
 use axum::{
     extract::{Path, Query, Request, State},
     http::{header, StatusCode},
@@ -29,6 +33,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route(
             "/api/v1/characters/{server}/{name}/inventory",
             get(latest_inventory),
+        )
+        .route(
+            "/api/v1/characters/{server}/{name}/stats",
+            get(character_stats),
         )
         .route("/api/v1/items", get(search_items))
         .route("/api/v1/items/{key}", get(get_item))
@@ -252,10 +260,14 @@ async fn items_by_name(
         .collect()
 }
 
-async fn latest_inventory(
-    State(state): State<AppState>,
-    Path((server, name)): Path<(String, String)>,
-) -> Result<Json<InventoryView>, AppError> {
+struct Snapshot {
+    character: String,
+    server: String,
+    captured_at: OffsetDateTime,
+    entries: Vec<InventoryEntry>,
+}
+
+async fn latest_snapshot(pool: &PgPool, server: &str, name: &str) -> Result<Snapshot, AppError> {
     let row = sqlx::query(
         "select c.name, c.server, s.captured_at, s.entries \
          from characters c \
@@ -264,33 +276,93 @@ async fn latest_inventory(
          order by s.captured_at desc, s.id desc \
          limit 1",
     )
-    .bind(&server)
-    .bind(&name)
-    .fetch_optional(&state.pool)
+    .bind(server)
+    .bind(name)
+    .fetch_optional(pool)
     .await?
     .ok_or(AppError::NotFound)?;
 
     let entries: SqlJson<Vec<InventoryEntry>> = row.try_get("entries")?;
+    Ok(Snapshot {
+        character: row.try_get("name")?,
+        server: row.try_get("server")?,
+        captured_at: row.try_get("captured_at")?,
+        entries: entries.0,
+    })
+}
+
+async fn join_items(
+    pool: &PgPool,
+    entries: Vec<InventoryEntry>,
+) -> Result<Vec<InventoryEntryView>, sqlx::Error> {
     let mut names: Vec<String> = entries
-        .0
         .iter()
         .filter(|entry| !entry.is_empty_slot())
         .map(|entry| entry.name.to_lowercase())
         .collect();
     names.sort_unstable();
     names.dedup();
-    let items = items_by_name(&state.pool, &names).await?;
+    let items = items_by_name(pool, &names).await?;
 
+    Ok(entries
+        .into_iter()
+        .map(|entry| InventoryEntryView {
+            item: items.get(&entry.name.to_lowercase()).cloned(),
+            entry,
+        })
+        .collect())
+}
+
+async fn latest_inventory(
+    State(state): State<AppState>,
+    Path((server, name)): Path<(String, String)>,
+) -> Result<Json<InventoryView>, AppError> {
+    let snapshot = latest_snapshot(&state.pool, &server, &name).await?;
     Ok(Json(InventoryView {
-        character: row.try_get("name")?,
-        server: row.try_get("server")?,
-        captured_at: row.try_get("captured_at")?,
-        entries: entries
-            .0
+        character: snapshot.character,
+        server: snapshot.server,
+        captured_at: snapshot.captured_at,
+        entries: join_items(&state.pool, snapshot.entries).await?,
+    }))
+}
+
+#[derive(Serialize)]
+struct StatsView {
+    character: String,
+    server: String,
+    #[serde(with = "time::serde::rfc3339")]
+    captured_at: OffsetDateTime,
+    stats: GearStats,
+    equipped: Vec<InventoryEntryView>,
+}
+
+async fn character_stats(
+    State(state): State<AppState>,
+    Path((server, name)): Path<(String, String)>,
+) -> Result<Json<StatsView>, AppError> {
+    let snapshot = latest_snapshot(&state.pool, &server, &name).await?;
+    let views = join_items(&state.pool, snapshot.entries).await?;
+
+    let pairs: Vec<(InventoryEntry, Option<ItemStats>)> = views
+        .iter()
+        .map(|view| {
+            let stats = view
+                .item
+                .as_ref()
+                .and_then(|item| serde_json::from_value(item.stats.clone()).ok());
+            (view.entry.clone(), stats)
+        })
+        .collect();
+
+    Ok(Json(StatsView {
+        character: snapshot.character,
+        server: snapshot.server,
+        captured_at: snapshot.captured_at,
+        stats: derive_gear_stats(&pairs),
+        equipped: views
             .into_iter()
-            .map(|entry| InventoryEntryView {
-                item: items.get(&entry.name.to_lowercase()).cloned(),
-                entry,
+            .filter(|view| {
+                !view.entry.is_empty_slot() && is_equipped_location(&view.entry.location)
             })
             .collect(),
     }))

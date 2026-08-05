@@ -6,6 +6,7 @@ const REFETCH_MS = 30_000;
 export const qk = {
 	characters: ['characters'] as const,
 	inventory: (server: string, name: string) => ['inventory', server, name] as const,
+	stats: (server: string, name: string) => ['stats', server, name] as const,
 	item: (key: string) => ['item', key] as const
 };
 
@@ -20,6 +21,13 @@ export const useInventory = (server: () => string, name: () => string) =>
 	createQuery(() => ({
 		queryKey: qk.inventory(server(), name()),
 		queryFn: () => endpoints.inventory(server(), name()),
+		refetchInterval: REFETCH_MS
+	}));
+
+export const useStats = (server: () => string, name: () => string) =>
+	createQuery(() => ({
+		queryKey: qk.stats(server(), name()),
+		queryFn: () => endpoints.stats(server(), name()),
 		refetchInterval: REFETCH_MS
 	}));
 

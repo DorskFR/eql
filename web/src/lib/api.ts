@@ -87,6 +87,60 @@ export interface InventoryView {
 	entries: InventoryEntry[];
 }
 
+export interface WeaponSummary {
+	name: string;
+	item_type: string | null;
+	damage: number | null;
+	delay: number | null;
+	ratio: number | null;
+}
+
+export interface ItemClasses {
+	location: string;
+	name: string;
+	classes: string[];
+}
+
+export interface GearStats {
+	ac: number;
+	hp: number;
+	mana: number;
+	endurance: number;
+	hp_regen: number;
+	mana_regen: number;
+	str: number;
+	sta: number;
+	agi: number;
+	dex: number;
+	wis: number;
+	int: number;
+	cha: number;
+	sv_fire: number;
+	sv_cold: number;
+	sv_magic: number;
+	sv_disease: number;
+	sv_poison: number;
+	haste: number;
+	weight: number;
+	equipped_count: number;
+	known_items: number;
+	unknown_items: number;
+	primary: WeaponSummary | null;
+	secondary: WeaponSummary | null;
+	usable_by: string[];
+	no_single_class_can_use_all: boolean;
+	min_classes_needed: number | null;
+	item_classes: ItemClasses[];
+}
+
+export interface StatsView {
+	character: string;
+	server: string;
+	captured_at: string;
+	stats: GearStats;
+	equipped: InventoryEntry[];
+}
+
 export class ApiError extends Error {
 	status: number;
 	constructor(status: number, message: string) {
@@ -118,6 +172,10 @@ export const endpoints = {
 	inventory: (server: string, name: string) =>
 		get<InventoryView>(
 			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/inventory`
+		),
+	stats: (server: string, name: string) =>
+		get<StatsView>(
+			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/stats`
 		),
 	itemSearch: (query: string) =>
 		get<ItemRecord[]>(`/api/v1/items?q=${encodeURIComponent(query)}`),
