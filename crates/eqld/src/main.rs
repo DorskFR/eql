@@ -1,24 +1,5 @@
-use serde::Deserialize;
+use eqld::{config::Config, daemon::Daemon};
 use std::path::PathBuf;
-
-#[derive(Debug, Deserialize)]
-struct Config {
-    game: GameConfig,
-    api: ApiConfig,
-}
-
-#[derive(Debug, Deserialize)]
-struct GameConfig {
-    /// Same tree on Windows and inside the osxEQL Wine prefix.
-    root: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiConfig {
-    url: String,
-    #[allow(dead_code)]
-    token: String,
-}
 
 fn config_path() -> PathBuf {
     std::env::args_os()
@@ -30,9 +11,28 @@ fn config_path() -> PathBuf {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+
     let path = config_path();
-    let config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
-    tracing::info!(?config.game.root, api = %config.api.url, "eqld starting");
-    // TODO: watch <root>/*-Inventory.txt, tail Logs/eqlog_*.txt, upload.
+    let config = Config::load(&path)?;
+    let mut daemon = Daemon::new(config)?;
+
+    tracing::info!(
+        root = %daemon.config().game.root.display(),
+        api = %daemon.config().api.url,
+        poll_secs = daemon.config().poll_interval().as_secs(),
+        state = %daemon.state_path().display(),
+        "eqld starting"
+    );
+
+    loop {
+        daemon.tick().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutdown requested");
+                break;
+            }
+            _ = tokio::time::sleep(daemon.delay()) => {}
+        }
+    }
     Ok(())
 }
