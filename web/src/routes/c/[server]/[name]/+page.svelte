@@ -6,11 +6,13 @@
 		Button,
 		Card,
 		Cluster,
+		CodeBlock,
 		DataTable,
 		EmptyState,
 		Heading,
 		Link,
 		Metric,
+		Progress,
 		Spinner,
 		Stack,
 		Tabs,
@@ -20,6 +22,19 @@
 		type TabItem
 	} from '@dorsk/tsumikit';
 	import type { InventoryEntry, ItemClasses, LogEvent, WeaponSummary } from '$lib/api';
+	import {
+		type BuildRow,
+		coin,
+		type DropRow,
+		duration,
+		percent,
+		projectAlltime,
+		projectAtlas,
+		projectQuest,
+		type QuestRow,
+		rawJson,
+		type ZoneRow
+	} from '$lib/harvest';
 	import { describeEvent, eventTone } from '$lib/events';
 	import { filled, groupEntries } from '$lib/inventory';
 	import {
@@ -33,7 +48,7 @@
 		weaponDamageDelay,
 		weaponRatio
 	} from '$lib/items';
-	import { useEvents, useInventory, useStats } from '$lib/queries';
+	import { useEvents, useHarvest, useInventory, useStats } from '$lib/queries';
 
 	const server = $derived(page.params.server ?? '');
 	const name = $derived(page.params.name ?? '');
@@ -54,6 +69,98 @@
 	);
 
 	const eventRows = $derived(events.data?.pages.flat() ?? []);
+
+	const atlasDoc = useHarvest(
+		() => server,
+		() => name,
+		'atlas'
+	);
+	const questDoc = useHarvest(
+		() => server,
+		() => name,
+		'quest'
+	);
+	const alltimeDoc = useHarvest(
+		() => server,
+		() => name,
+		'alltime'
+	);
+
+	const atlas = $derived(projectAtlas(atlasDoc.data?.doc));
+	const quests = $derived(projectQuest(questDoc.data?.doc));
+	const alltime = $derived(projectAlltime(alltimeDoc.data?.doc));
+
+	const zoneColumns: Column<ZoneRow>[] = [
+		{ key: 'zone', label: 'Zone', sortable: true },
+		{ key: 'kills', label: 'Kills', align: 'right', sortable: true },
+		{ key: 'group_kills', label: 'Group kills', align: 'right', sortable: true },
+		{ key: 'loots', label: 'Loots', align: 'right', sortable: true },
+		{
+			key: 'coin_copper',
+			label: 'Coin',
+			align: 'right',
+			sortable: true,
+			get: (row) => coin(row.coin_copper)
+		},
+		{ key: 'mobs', label: 'Mobs seen', align: 'right', sortable: true }
+	];
+
+	const dropColumns: Column<DropRow>[] = [
+		{ key: 'item', label: 'Item', sortable: true },
+		{ key: 'mob', label: 'From', sortable: true },
+		{ key: 'zone', label: 'Zone', sortable: true },
+		{ key: 'count', label: 'Count', align: 'right', sortable: true },
+		{
+			key: 'sold_copper',
+			label: 'Sold for',
+			align: 'right',
+			sortable: true,
+			get: (row) => coin(row.sold_copper)
+		}
+	];
+
+	const questColumns: Column<QuestRow>[] = [
+		{ key: 'quest', label: 'Quest', sortable: true },
+		{ key: 'have', label: 'Have', align: 'right', sortable: true },
+		{
+			key: 'need',
+			label: 'Need',
+			align: 'right',
+			sortable: true,
+			get: (row) => (row.need === null ? '—' : String(row.need))
+		},
+		{ key: 'ratio', label: 'Progress' },
+		{ key: 'flags', label: '' }
+	];
+
+	const buildColumns: Column<BuildRow>[] = [
+		{ key: 'build', label: 'Build', sortable: true },
+		{
+			key: 'dps',
+			label: 'DPS',
+			align: 'right',
+			sortable: true,
+			get: (row) => (row.dps === null ? '—' : row.dps.toFixed(1))
+		},
+		{ key: 'damage', label: 'Damage', align: 'right', sortable: true },
+		{ key: 'kills', label: 'Kills', align: 'right', sortable: true },
+		{ key: 'deaths', label: 'Deaths', align: 'right', sortable: true },
+		{ key: 'biggest', label: 'Biggest hit', align: 'right', sortable: true },
+		{
+			key: 'accuracy',
+			label: 'Accuracy',
+			align: 'right',
+			sortable: true,
+			get: (row) => percent(row.accuracy)
+		},
+		{
+			key: 'combat_secs',
+			label: 'In combat',
+			align: 'right',
+			sortable: true,
+			get: (row) => duration(row.combat_secs)
+		}
+	];
 
 	const eventColumns: Column<LogEvent>[] = [
 		{ key: 'at', label: 'When' },
@@ -128,7 +235,9 @@
 		{ id: 'stats', label: 'Stats', icon: 'star' },
 		{ id: 'general', label: `General (${general.length})`, icon: 'archive' },
 		{ id: 'bank', label: `Bank (${bank.length})`, icon: 'lock' },
-		{ id: 'events', label: 'Events', icon: 'clock' }
+		{ id: 'events', label: 'Events', icon: 'clock' },
+		{ id: 'atlas', label: 'Atlas', icon: 'grid' },
+		{ id: 'quests', label: 'Quests', icon: 'bookmark' }
 	]);
 
 	let tab = $state('stats');
@@ -198,6 +307,10 @@
 					{@render statsPanel()}
 				{:else if id === 'events'}
 					{@render eventsPanel()}
+				{:else if id === 'atlas'}
+					{@render atlasPanel()}
+				{:else if id === 'quests'}
+					{@render questsPanel()}
 				{:else}
 					<Card padding="none">
 						{#if id === 'general'}
@@ -334,7 +447,9 @@
 				</Stack>
 			</Card>
 
-			{#if restricted.length}
+			{@render alltimeCard()}
+
+		{#if restricted.length}
 				<Card padding="none">
 					<DataTable
 						columns={classColumns}
@@ -421,5 +536,186 @@
 		<Text tone="faint">Empty</Text>
 	{:else}
 		<Text>{entry.name}</Text>
+	{/if}
+{/snippet}
+
+{#snippet harvestState(
+	query: { isPending: boolean; isError: boolean; error: Error | null; refetch: () => void },
+	what: string
+)}
+	{#if query.isPending}
+		<Card>
+			<Cluster gap="var(--sp-2)">
+				<Spinner />
+				<Text tone="muted">Loading {what}…</Text>
+			</Cluster>
+		</Card>
+	{:else}
+		<EmptyState
+			title="No {what} yet"
+			description="Run the EQL Log Reader companion app and switch on [harvest] in eqld to see this."
+			icon="archive"
+			actionLabel="Retry"
+			onAction={() => query.refetch()}
+		/>
+	{/if}
+{/snippet}
+
+{#snippet rawFallback(label: string, json: string)}
+	<Card>
+		<Stack gap="var(--sp-2)">
+			<Text variant="caption" tone="muted">
+				{label} — the harvested file did not match a shape this page knows, so it is shown raw.
+			</Text>
+			<CodeBlock code={json} lang="json" wrap copy />
+		</Stack>
+	</Card>
+{/snippet}
+
+{#snippet alltimeCard()}
+	{#if alltimeDoc.data && alltime.usable}
+		<Card>
+			<Stack gap="var(--sp-2)">
+				<Cluster justify="space-between">
+					<Heading level={3} size="sm">Per-build lifetime</Heading>
+					<Badge tone="neutral">
+						harvested <Timestamp
+							value={alltimeDoc.data.captured_at}
+							mode="relative"
+							details={false}
+						/>
+					</Badge>
+				</Cluster>
+				<DataTable
+					columns={buildColumns}
+					rows={alltime.builds}
+					rowKey={(row) => row.key}
+					empty="No lifetime combat stats."
+				/>
+				{#if alltime.sources.length}
+					<Cluster gap="var(--sp-2)">
+						{#each alltime.sources as source (source.key)}
+							<Badge tone="info" size="sm" mono>
+								{source.source}
+								{percent(source.share)}
+							</Badge>
+						{/each}
+					</Cluster>
+				{/if}
+			</Stack>
+		</Card>
+	{:else if alltimeDoc.data}
+		{@render rawFallback('Per-build lifetime', rawJson(alltimeDoc.data))}
+	{/if}
+{/snippet}
+
+{#snippet atlasPanel()}
+	{#if !atlasDoc.data}
+		{@render harvestState(atlasDoc, 'atlas data')}
+	{:else if !atlas.usable}
+		{@render rawFallback('Atlas', rawJson(atlasDoc.data))}
+	{:else}
+		<Stack gap="var(--sp-3)">
+			<Cluster justify="space-between">
+				<Text variant="caption" tone="faint">
+					Observed by the EQL Log Reader Atlas across {atlas.zones.length} zones.
+				</Text>
+				<Badge tone="neutral">
+					harvested <Timestamp value={atlasDoc.data.captured_at} mode="relative" details={false} />
+				</Badge>
+			</Cluster>
+
+			<AutoGrid min="10rem">
+				<Metric label="Kills" value={atlas.kills} icon="star" tone="ok" />
+				<Metric label="Group kills" value={atlas.group_kills} icon="users" />
+				<Metric label="Loots" value={atlas.loots} icon="archive" tone="info" />
+				<Metric label="Coin" value={coin(atlas.coin_copper)} icon="tag" />
+			</AutoGrid>
+
+			<Card padding="none">
+				<DataTable
+					columns={zoneColumns}
+					rows={atlas.zones}
+					rowKey={(row) => row.key}
+					empty="No zones recorded."
+					stickyHeader
+				/>
+			</Card>
+
+			{#if atlas.top_drops.length}
+				<Stack gap="var(--sp-2)">
+					<Heading level={3} size="sm">Top drops</Heading>
+					<Card padding="none">
+						<DataTable
+							columns={dropColumns}
+							rows={atlas.top_drops}
+							rowKey={(row) => row.key}
+							cellSnippets={{ item: dropItem }}
+							empty="No drops recorded."
+							stickyHeader
+						/>
+					</Card>
+				</Stack>
+			{/if}
+		</Stack>
+	{/if}
+{/snippet}
+
+{#snippet dropItem(row: DropRow)}
+	<Link href={itemPath(row.item)}>{row.item}</Link>
+{/snippet}
+
+{#snippet questProgress(row: QuestRow)}
+	{#if row.ratio === null}
+		<Text tone="faint" variant="caption">{row.have} collected</Text>
+	{:else}
+		<Progress value={row.ratio * 100} max={100} size="sm" tone={row.ratio >= 1 ? 'success' : 'accent'} />
+	{/if}
+{/snippet}
+
+{#snippet questFlags(row: QuestRow)}
+	<Cluster gap="var(--sp-2)">
+		{#if row.tracked}
+			<Badge tone="info" size="sm">tracked</Badge>
+		{/if}
+		{#if row.confirmed}
+			<Badge tone="ok" size="sm">completed</Badge>
+		{/if}
+	</Cluster>
+{/snippet}
+
+{#snippet questsPanel()}
+	{#if !questDoc.data}
+		{@render harvestState(questDoc, 'quest data')}
+	{:else if !quests.usable}
+		{@render rawFallback('Quests', rawJson(questDoc.data))}
+	{:else}
+		<Stack gap="var(--sp-3)">
+			<Cluster justify="space-between">
+				<Text variant="caption" tone="faint">
+					Required counts live in the companion app's quest database, so only collected items are
+					known here.
+				</Text>
+				<Badge tone="neutral">
+					harvested <Timestamp value={questDoc.data.captured_at} mode="relative" details={false} />
+				</Badge>
+			</Cluster>
+
+			<Cluster gap="var(--sp-3)">
+				<Metric label="On the list" value={quests.quests.length} icon="list" />
+				<Metric label="Confirmed complete" value={quests.confirmed} icon="check-circle" tone="ok" />
+			</Cluster>
+
+			<Card padding="none">
+				<DataTable
+					columns={questColumns}
+					rows={quests.quests}
+					rowKey={(row) => row.key}
+					cellSnippets={{ ratio: questProgress, flags: questFlags }}
+					empty="No quests tracked."
+					stickyHeader
+				/>
+			</Card>
+		</Stack>
 	{/if}
 {/snippet}

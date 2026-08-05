@@ -1,0 +1,22 @@
+{
+  "hits": 40213,
+  "misses": 9110,
+  "crits": 1877,
+  "kills": 1349,
+  "deaths": 21,
+  "biggest": 412,
+  "combat_secs": 91234.5,
+  "stance_secs": {
+    "Precision": 51200.0,
+    "Ferocity": 30011.25
+  },
+  "invocation_secs": {
+    "Blessing of Nature": 12100.5
+  },
+  "source_dmg": {
+    "melee": 4120334,
+    "spell": 881204,
+    "dot": 210556,
+    "proc": 91002
+  }
+}

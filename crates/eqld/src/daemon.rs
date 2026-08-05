@@ -1,11 +1,11 @@
 use crate::{
     backoff::Backoff,
     config::Config,
-    logs,
+    harvest, logs,
     state::{FileState, LastStatus, LogState, State},
 };
 use eql_core::{
-    api::{InventoryUpload, LogBatch},
+    api::{HarvestDoc, InventoryUpload, LogBatch},
     inventory,
 };
 use serde::Serialize;
@@ -95,6 +95,8 @@ pub struct TickReport {
     pub rejections: usize,
     pub log_events: usize,
     pub log_lines_dropped: usize,
+    pub harvested: usize,
+    pub harvest_skipped: usize,
 }
 
 /// One tick reads at most this much of each log; the rest waits for the next
@@ -163,6 +165,10 @@ impl Daemon {
         }
 
         dirty_state |= self.tail_logs(&root, &mut report).await;
+
+        if let Some(dir) = self.config.harvest_dir() {
+            dirty_state |= self.harvest_docs(&dir, &mut report).await;
+        }
 
         if report.log_events > 0 || report.log_lines_dropped > 0 {
             tracing::info!(
@@ -416,6 +422,158 @@ impl Daemon {
             file_name,
             LogState {
                 offset: offset + consumed as u64,
+            },
+        );
+        Ok(true)
+    }
+
+    async fn harvest_docs(&mut self, dir: &Path, report: &mut TickReport) -> bool {
+        let paths = match harvest::scan(dir) {
+            Ok(paths) => paths,
+            Err(err) => {
+                tracing::warn!(dir = %dir.display(), %err, "cannot scan harvest directory");
+                return false;
+            }
+        };
+        let mut dirty = false;
+        for path in paths {
+            match self.harvest_one(&path, report).await {
+                Ok(changed) => dirty |= changed,
+                Err(err) => {
+                    tracing::warn!(file = %path.display(), %err, "skipping harvest file this tick")
+                }
+            }
+        }
+        dirty
+    }
+
+    async fn harvest_one(
+        &mut self,
+        path: &Path,
+        report: &mut TickReport,
+    ) -> Result<bool, std::io::Error> {
+        let Some(file_name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(String::from)
+        else {
+            return Ok(false);
+        };
+        let Some(identity) = harvest::parse_filename(&file_name) else {
+            return Ok(false);
+        };
+        let metadata = std::fs::metadata(path)?;
+        let len = metadata.len();
+        let mtime = metadata.modified().ok().and_then(unix_secs);
+
+        if len > harvest::MAX_BYTES {
+            report.harvest_skipped += 1;
+            tracing::warn!(
+                file = %file_name,
+                len,
+                limit = harvest::MAX_BYTES,
+                "harvest file is too large to ship, skipping"
+            );
+            return Ok(false);
+        }
+        // Hashed whole every tick, unlike inventory: a same-second rewrite of
+        // equal length slips past an mtime+len gate, and these files are capped.
+        let contents = std::fs::read_to_string(path)?;
+        let hash = content_hash(&contents);
+        match decide(self.state.harvest.get(&file_name), &hash) {
+            Decision::SkipAlreadyUploaded => {
+                report.harvest_skipped += 1;
+                let previous = self
+                    .state
+                    .harvest
+                    .get_mut(&file_name)
+                    .expect("decided on it");
+                let changed = previous.mtime != mtime || previous.len != len;
+                previous.mtime = mtime;
+                previous.len = len;
+                return Ok(changed);
+            }
+            Decision::SkipRejected => {
+                report.harvest_skipped += 1;
+                return Ok(false);
+            }
+            Decision::Upload => {}
+        }
+
+        let doc: serde_json::Value = match serde_json::from_str(&contents) {
+            Ok(doc) => doc,
+            Err(err) => {
+                report.parse_failures += 1;
+                tracing::warn!(file = %file_name, %err, "harvest file is not json yet, retrying next tick");
+                return Ok(false);
+            }
+        };
+
+        let upload = HarvestDoc {
+            character: identity.character.clone(),
+            server: identity.server.clone(),
+            kind: identity.kind.clone(),
+            captured_at: mtime,
+            doc,
+        };
+        let outcome = self.send(self.config.harvest_endpoint(), &upload).await;
+        let now = unix_secs(SystemTime::now());
+
+        let last_status = match &outcome {
+            Ok(status) if status.is_success() => {
+                report.harvested += 1;
+                tracing::info!(
+                    character = %identity.character,
+                    server = %identity.server,
+                    kind = %identity.kind,
+                    build = identity.build.as_deref().unwrap_or("-"),
+                    status = status.as_u16(),
+                    "uploaded harvest doc"
+                );
+                LastStatus::Uploaded
+            }
+            Ok(status) if status.is_server_error() => {
+                report.retryable_failures += 1;
+                tracing::warn!(file = %file_name, status = status.as_u16(), "server error, will retry");
+                LastStatus::Failed {
+                    error: format!("http {}", status.as_u16()),
+                }
+            }
+            Ok(status) => {
+                report.rejections += 1;
+                tracing::error!(file = %file_name, status = status.as_u16(), "harvest rejected, parked until the file changes");
+                LastStatus::Rejected {
+                    status: status.as_u16(),
+                }
+            }
+            Err(err) => {
+                report.retryable_failures += 1;
+                tracing::warn!(file = %file_name, %err, "harvest upload failed, will retry");
+                LastStatus::Failed {
+                    error: err.to_string(),
+                }
+            }
+        };
+
+        let uploaded = matches!(last_status, LastStatus::Uploaded);
+        let previous_uploaded_hash = self
+            .state
+            .harvest
+            .get(&file_name)
+            .and_then(|previous| previous.uploaded_hash.clone());
+        self.state.harvest.insert(
+            file_name,
+            FileState {
+                mtime,
+                len,
+                hash: hash.clone(),
+                uploaded_hash: if uploaded {
+                    Some(hash)
+                } else {
+                    previous_uploaded_hash
+                },
+                uploaded_at: if uploaded { now } else { None },
+                last_status,
             },
         );
         Ok(true)
