@@ -8,6 +8,8 @@ authors.workspace = true
 [dependencies]
 eql-core = { path = "../eql-core" }
 axum = "0.8"
+regex = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "time"] }

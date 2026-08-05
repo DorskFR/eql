@@ -1,0 +1,26 @@
+{{Sky Era}}
+
+<onlyinclude>{{Itempage
+|notes       = This item is the result of a quest.
+|itemname    = Azarack Skin Wristwraps
+|lucy_img_ID = 637
+|statsblock  = 
+No Trade<br>
+Class: BST<br>
+Race: ALL<br>
+Wrist<br>
+AC: 5 HP: +35 END: +10<br>
+STR: +5 STA: +5 DEX: +5<br>
+WT: 1.0  Size: SMALL<br>
+Click Effect: [[Whirl Bolt]] (Must Equip) - Cast Time: 1.0 seconds, Required Level: 46, Cooldown: 240 seconds
+|relatedquests =
+
+* [[Beastlord Plane of Sky Tests]]
+
+}}</onlyinclude>
+
+[[Category:Beastlord Equipment]]
+[[Category:Wrist]]
+[[Category:Plane of Sky]]
+
+[[Category:Quest Items]]

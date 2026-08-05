@@ -1,0 +1,33 @@
+{{Classic Era}}
+
+<onlyinclude>{{Itempage
+|notes       = Part of the [[Rubicite Armor Set]].
+|itemname    = Rubicite Breastplate
+|lucy_img_ID = 624
+|statsblock  = 
+MAGIC ITEM  LORE ITEM<br>
+Slot: CHEST<br>
+AC: 19<br>
+HP Regen: 6  <br>
+WT: 6.0  Size: LARGE<br>
+Class: WAR CLR PAL RNG SHD BRD ROG SHM<br>
+Race: ALL<br>
+
+|dropsfrom = 
+
+[[Cazic Thule]]
+
+* [[Avatar of Fear]] Classic Phase 1
+}}</onlyinclude>
+
+[[Category:Bard Equipment]]
+[[Category:Cleric Equipment]]
+[[Category:Paladin Equipment]]
+[[Category:Ranger Equipment]]
+[[Category:Rogue Equipment]]
+[[Category:Shaman Equipment]]
+[[Category:Shadow Knight Equipment]]
+[[Category:Warrior Equipment]]
+[[Category:Chest]]
+[[Category:Fashion: Plate]]
+[[Category:Fashion: Ruby Red]]

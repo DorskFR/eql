@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{from_fn_with_state, Next},
     response::{IntoResponse, Response},
@@ -7,9 +7,9 @@ use axum::{
     Json, Router,
 };
 use eql_core::{api::InventoryUpload, inventory::InventoryEntry};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{types::Json as SqlJson, PgPool, Row};
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use time::OffsetDateTime;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -30,6 +30,8 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             "/api/v1/characters/{server}/{name}/inventory",
             get(latest_inventory),
         )
+        .route("/api/v1/items", get(search_items))
+        .route("/api/v1/items/{key}", get(get_item))
         .merge(ingest);
 
     let index = web_dist.join("index.html");
@@ -196,7 +198,58 @@ struct InventoryView {
     server: String,
     #[serde(with = "time::serde::rfc3339")]
     captured_at: OffsetDateTime,
-    entries: Vec<InventoryEntry>,
+    entries: Vec<InventoryEntryView>,
+}
+
+#[derive(Serialize)]
+struct InventoryEntryView {
+    #[serde(flatten)]
+    entry: InventoryEntry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item: Option<ItemRecord>,
+}
+
+#[derive(Clone, Serialize)]
+struct ItemRecord {
+    id: i64,
+    game_id: Option<i64>,
+    name: String,
+    stats: serde_json::Value,
+    #[serde(with = "time::serde::rfc3339")]
+    scraped_at: OffsetDateTime,
+}
+
+fn item_from_row(row: &sqlx::postgres::PgRow) -> Result<ItemRecord, sqlx::Error> {
+    let stats: SqlJson<serde_json::Value> = row.try_get("stats")?;
+    Ok(ItemRecord {
+        id: row.try_get("id")?,
+        game_id: row.try_get("game_id")?,
+        name: row.try_get("name")?,
+        stats: stats.0,
+        scraped_at: row.try_get("scraped_at")?,
+    })
+}
+
+/// Wiki item pages carry no in-game item id, so the join is by folded name.
+async fn items_by_name(
+    pool: &PgPool,
+    names: &[String],
+) -> Result<HashMap<String, ItemRecord>, sqlx::Error> {
+    if names.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        "select id, game_id, name, stats, scraped_at from items where lower(name) = any($1)",
+    )
+    .bind(names)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let item = item_from_row(row)?;
+            Ok((item.name.to_lowercase(), item))
+        })
+        .collect()
 }
 
 async fn latest_inventory(
@@ -218,12 +271,75 @@ async fn latest_inventory(
     .ok_or(AppError::NotFound)?;
 
     let entries: SqlJson<Vec<InventoryEntry>> = row.try_get("entries")?;
+    let mut names: Vec<String> = entries
+        .0
+        .iter()
+        .filter(|entry| !entry.is_empty_slot())
+        .map(|entry| entry.name.to_lowercase())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let items = items_by_name(&state.pool, &names).await?;
+
     Ok(Json(InventoryView {
         character: row.try_get("name")?,
         server: row.try_get("server")?,
         captured_at: row.try_get("captured_at")?,
-        entries: entries.0,
+        entries: entries
+            .0
+            .into_iter()
+            .map(|entry| InventoryEntryView {
+                item: items.get(&entry.name.to_lowercase()).cloned(),
+                entry,
+            })
+            .collect(),
     }))
+}
+
+#[derive(Deserialize)]
+struct ItemSearch {
+    #[serde(default)]
+    q: String,
+}
+
+async fn search_items(
+    State(state): State<AppState>,
+    Query(search): Query<ItemSearch>,
+) -> Result<Json<Vec<ItemRecord>>, AppError> {
+    let needle = search.q.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    let rows = sqlx::query(
+        "select id, game_id, name, stats, scraped_at from items \
+         where lower(name) like '%' || $1 || '%' \
+         order by position($1 in lower(name)), length(name), name limit 20",
+    )
+    .bind(&needle)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.iter()
+            .map(item_from_row)
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+    ))
+}
+
+async fn get_item(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<ItemRecord>, AppError> {
+    let numeric: Option<i64> = key.parse().ok();
+    let row = sqlx::query(
+        "select id, game_id, name, stats, scraped_at from items \
+         where lower(name) = lower($1) or id = $2 or game_id = $2 limit 1",
+    )
+    .bind(&key)
+    .bind(numeric)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(Json(item_from_row(&row)?))
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -1,0 +1,43 @@
+{{Classic Era}}
+
+<onlyinclude>{{Itempage
+|notes       = These mid-grade sleeves have unusually high AC and low weight. They have no graphic (like [[Cloth Armor]]).
+|itemname    = Azure Sleeves
+|lucy_img_ID = 669
+|merchant_value = 6.7p
+|statsblock  = 
+MAGIC ITEM<br>
+Slot: ARMS<br>
+AC: 12<br>
+WT: 0.6  Size: SMALL<br>
+Class: ALL<br>
+Race: ALL<br>
+|focus_effect = Improved Damage I
+|dropsfrom = 
+
+[[Lower Guk]]
+
+* [[a minotaur patriarch]]
+
+}}</onlyinclude>
+
+[[Category:Bard Equipment]]
+[[Category:Cleric Equipment]]
+[[Category:Druid Equipment]]
+[[Category:Enchanter Equipment]]
+[[Category:Magician Equipment]]
+[[Category:Monk Equipment]]
+[[Category:Necromancer Equipment]]
+[[Category:Paladin Equipment]]
+[[Category:Ranger Equipment]]
+[[Category:Rogue Equipment]]
+[[Category:Shaman Equipment]]
+[[Category:Shadow Knight Equipment]]
+[[Category:Warrior Equipment]]
+[[Category:Wizard Equipment]]
+[[Category:Arms]]
+[[Category:Focus Items]]
+[[Category:Improved Damage I]]
+[[Category:Lower Guk]]
+[[Category:Fashion: Leather]]
+[[Category:Fashion: Dark Blue]]
