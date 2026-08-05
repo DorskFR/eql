@@ -16,6 +16,7 @@ struct GameConfig {
 #[derive(Debug, Deserialize)]
 struct ApiConfig {
     url: String,
+    #[allow(dead_code)]
     token: String,
 }
 
