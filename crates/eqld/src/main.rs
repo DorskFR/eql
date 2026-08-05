@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state_exists = daemon.state_path().exists(),
         harvest = %harvest,
         overlays = ?daemon.overlays(),
+        hidden = ?daemon.hidden_overlays(),
         "eqld starting"
     );
 

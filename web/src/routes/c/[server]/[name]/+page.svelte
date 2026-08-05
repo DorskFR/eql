@@ -33,6 +33,7 @@
 		projectQuest,
 		type QuestRow,
 		rawJson,
+		type ShareRow,
 		type ZoneRow
 	} from '$lib/harvest';
 	import { describeEvent, eventTone } from '$lib/events';
@@ -139,19 +140,29 @@
 		{ key: 'flags', label: '' }
 	];
 
+	const count = (value: number) => value.toLocaleString();
+	const rate = (value: number | null) => (value === null ? '—' : value.toFixed(1));
+
 	const buildColumns: Column<BuildRow>[] = [
-		{ key: 'build', label: 'Build', sortable: true },
+		{ key: 'build', label: 'Build', sortable: true, width: '11rem' },
 		{
-			key: 'dps',
-			label: 'DPS',
+			key: 'damage',
+			label: 'Damage',
 			align: 'right',
 			sortable: true,
-			get: (row) => (row.dps === null ? '—' : row.dps.toFixed(1))
+			get: (row) => count(row.damage)
 		},
-		{ key: 'damage', label: 'Damage', align: 'right', sortable: true },
+		{ key: 'dps', label: 'DPS', align: 'right', sortable: true, get: (row) => rate(row.dps) },
 		{ key: 'kills', label: 'Kills', align: 'right', sortable: true },
 		{ key: 'deaths', label: 'Deaths', align: 'right', sortable: true },
-		{ key: 'biggest', label: 'Biggest hit', align: 'right', sortable: true },
+		{
+			key: 'kill_death',
+			label: 'K/D',
+			align: 'right',
+			sortable: true,
+			get: (row) => rate(row.kill_death)
+		},
+		{ key: 'hits', label: 'Hits', align: 'right', sortable: true, get: (row) => count(row.hits) },
 		{
 			key: 'accuracy',
 			label: 'Accuracy',
@@ -159,6 +170,14 @@
 			sortable: true,
 			get: (row) => percent(row.accuracy)
 		},
+		{
+			key: 'crit_rate',
+			label: 'Crit rate',
+			align: 'right',
+			sortable: true,
+			get: (row) => percent(row.crit_rate)
+		},
+		{ key: 'biggest', label: 'Biggest hit', align: 'right', sortable: true },
 		{
 			key: 'combat_secs',
 			label: 'In combat',
@@ -241,7 +260,8 @@
 		{ id: 'bank', label: `Bank (${bank.length})`, icon: 'lock' },
 		{ id: 'events', label: 'Events', icon: 'clock' },
 		{ id: 'atlas', label: 'Atlas', icon: 'grid' },
-		{ id: 'quests', label: 'Quests', icon: 'bookmark' }
+		{ id: 'quests', label: 'Quests', icon: 'bookmark' },
+		{ id: 'alltime', label: 'Lifetime', icon: 'live' }
 	]);
 
 	let tab = $state('general');
@@ -361,6 +381,8 @@
 							{@render atlasPanel()}
 						{:else if id === 'quests'}
 							{@render questsPanel()}
+						{:else if id === 'alltime'}
+							{@render alltimePanel()}
 						{:else if id === 'general'}
 							{@render bagPanel(generalBags, 'General inventory is empty.')}
 						{:else}
@@ -509,8 +531,6 @@
 				</Card>
 			</AutoGrid>
 
-			{@render alltimeCard()}
-
 			{#if restricted.length}
 				<Card padding="none">
 					<DataTable
@@ -619,40 +639,138 @@
 	</Card>
 {/snippet}
 
-{#snippet alltimeCard()}
-	{#if alltimeDoc.data && alltime.usable}
-		<Card>
-			<Stack gap="var(--sp-2)">
+{#snippet shareBars(rows: ShareRow[], format: (value: number) => string)}
+	<Stack gap="var(--sp-2)">
+		{#each rows as row (row.key)}
+			<Stack gap="var(--sp-1)">
 				<Cluster justify="space-between">
-					<Heading level={3} size="sm">Per-build lifetime</Heading>
-					<Badge tone="neutral">
-						harvested <Timestamp
-							value={alltimeDoc.data.captured_at}
-							mode="relative"
-							details={false}
-						/>
-					</Badge>
+					<Text variant="caption">{row.label}</Text>
+					<Text variant="caption" tone="muted">{format(row.value)} · {percent(row.share)}</Text>
 				</Cluster>
+				<Progress value={row.share * 100} max={100} size="sm" tone="accent" />
+			</Stack>
+		{/each}
+	</Stack>
+{/snippet}
+
+{#snippet shareCard(title: string, rows: ShareRow[], format: (value: number) => string)}
+	<Card>
+		<Stack gap="var(--sp-3)">
+			<Heading level={3} size="sm">{title}</Heading>
+			{@render shareBars(rows, format)}
+		</Stack>
+	</Card>
+{/snippet}
+
+{#snippet buildCard(row: BuildRow)}
+	<Card>
+		<Stack gap="var(--sp-3)">
+			<Cluster justify="space-between">
+				<Heading level={4} size="sm">{row.build}</Heading>
+				<Badge tone="info" size="sm" mono>{rate(row.dps)} dps</Badge>
+			</Cluster>
+			<Cluster gap="var(--sp-3)">
+				<Text variant="caption" tone="muted">{count(row.damage)} damage</Text>
+				<Text variant="caption" tone="muted">{row.kills} kills · {row.deaths} deaths</Text>
+				<Text variant="caption" tone="muted">{duration(row.combat_secs)} in combat</Text>
+			</Cluster>
+			{#if row.sources.length}
+				{@render shareBars(row.sources, count)}
+			{/if}
+			{#if row.stances.length}
+				<Stack gap="var(--sp-2)">
+					<Text variant="caption" tone="faint">Stances</Text>
+					{@render shareBars(row.stances, duration)}
+				</Stack>
+			{/if}
+			{#if row.invocations.length}
+				<Stack gap="var(--sp-2)">
+					<Text variant="caption" tone="faint">Invocations</Text>
+					{@render shareBars(row.invocations, duration)}
+				</Stack>
+			{/if}
+		</Stack>
+	</Card>
+{/snippet}
+
+{#snippet alltimePanel()}
+	{#if !alltimeDoc.data}
+		{@render harvestState(alltimeDoc, 'lifetime combat data')}
+	{:else if !alltime.usable}
+		{@render rawFallback('Lifetime', rawJson(alltimeDoc.data))}
+	{:else}
+		<Stack gap="var(--sp-3)">
+			<Cluster justify="space-between">
+				<Text variant="caption" tone="faint">
+					Counted by the EQL Log Reader DPS meter across {alltime.builds.length}
+					{alltime.builds.length === 1 ? 'build' : 'builds'} while it was running — time played without
+					the meter is not included.
+				</Text>
+				<Badge tone="neutral">
+					harvested <Timestamp value={alltimeDoc.data.captured_at} mode="relative" details={false} />
+				</Badge>
+			</Cluster>
+
+			<AutoGrid min="10rem">
+				<Metric label="Damage" value={count(alltime.totals.damage)} icon="live" tone="info" />
+				<Metric
+					label="DPS"
+					value={rate(alltime.totals.dps)}
+					icon="star"
+					tone="ok"
+					sub="while in combat"
+				/>
+				<Metric label="Kills" value={alltime.totals.kills} icon="check-circle" tone="ok" />
+				<Metric label="Deaths" value={alltime.totals.deaths} icon="x-circle" tone="danger" />
+				<Metric
+					label="Accuracy"
+					value={percent(alltime.totals.accuracy)}
+					icon="eye"
+					sub="{count(alltime.totals.hits)} of {count(
+						alltime.totals.hits + alltime.totals.misses
+					)} swings"
+				/>
+				<Metric
+					label="In combat"
+					value={duration(alltime.totals.combat_secs)}
+					icon="clock"
+					sub="biggest hit {alltime.totals.biggest}"
+				/>
+			</AutoGrid>
+
+			<Card padding="none">
 				<DataTable
 					columns={buildColumns}
 					rows={alltime.builds}
 					rowKey={(row) => row.key}
-					empty="No lifetime combat stats."
+					empty="No builds recorded."
+					stickyHeader
 				/>
+			</Card>
+
+			<AutoGrid min="18rem">
 				{#if alltime.sources.length}
-					<Cluster gap="var(--sp-2)">
-						{#each alltime.sources as source (source.key)}
-							<Badge tone="info" size="sm" mono>
-								{source.source}
-								{percent(source.share)}
-							</Badge>
-						{/each}
-					</Cluster>
+					{@render shareCard('Damage sources', alltime.sources, count)}
 				{/if}
-			</Stack>
-		</Card>
-	{:else if alltimeDoc.data}
-		{@render rawFallback('Per-build lifetime', rawJson(alltimeDoc.data))}
+				{#if alltime.stances.length}
+					{@render shareCard('Stance time', alltime.stances, duration)}
+				{/if}
+				{#if alltime.invocations.length}
+					{@render shareCard('Invocation time', alltime.invocations, duration)}
+				{/if}
+			</AutoGrid>
+
+			{#if alltime.builds.length > 1}
+				<Stack gap="var(--sp-2)">
+					<Heading level={3} size="sm">Build by build</Heading>
+					<AutoGrid min="18rem">
+						{#each alltime.builds as row (row.key)}
+							{@render buildCard(row)}
+						{/each}
+					</AutoGrid>
+				</Stack>
+			{/if}
+		</Stack>
 	{/if}
 {/snippet}
 
@@ -775,11 +893,7 @@
 	}
 
 	.eq-window {
-		--eq-gold: #b executable69454;
 		border-radius: 4px;
-	}
-
-	.eq-window {
 		--eq-gold: #96825a;
 		--eq-gold-bright: #c9b37a;
 		--eq-text: #d8cfae;
