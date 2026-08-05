@@ -38,11 +38,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut daemon = Daemon::new(config)?;
 
+    let harvest = daemon
+        .config()
+        .harvest_dir()
+        .map_or_else(|| "disabled".into(), |dir| dir.display().to_string());
     tracing::info!(
         root = %daemon.config().game.root.display(),
         api = %daemon.config().api.url,
         poll_secs = daemon.config().poll_interval().as_secs(),
         state = %daemon.state_path().display(),
+        state_exists = daemon.state_path().exists(),
+        harvest = %harvest,
         "eqld starting"
     );
 

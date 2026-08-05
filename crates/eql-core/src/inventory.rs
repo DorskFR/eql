@@ -59,7 +59,7 @@ pub fn parse(contents: &str) -> Result<Vec<InventoryEntry>, ParseError> {
     for (idx, line) in lines {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
-            continue;
+            break;
         }
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() != 5 {
@@ -102,6 +102,22 @@ mod tests {
     fn tolerates_crlf() {
         let crlf = SAMPLE.replace('\n', "\r\n");
         assert_eq!(parse(&crlf).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn ignores_keyring_trailer() {
+        let dump = format!("{SAMPLE}\nKeyRing\tName\tID\t\n");
+        assert_eq!(parse(&dump).unwrap().len(), 4);
+        let crlf = dump.replace('\n', "\r\n");
+        assert_eq!(parse(&crlf).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn ignores_keyring_trailer_with_rows() {
+        let dump = format!("{SAMPLE}\nKeyRing\tName\tID\t\nKeyRing\tSome Key\t12345\t\n");
+        let entries = parse(&dump).unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(entries.iter().all(|entry| entry.location != "KeyRing"));
     }
 
     #[test]

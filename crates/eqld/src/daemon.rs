@@ -103,12 +103,20 @@ pub struct TickReport {
 /// tick so a long-idle daemon cannot pull a whole session into memory.
 const MAX_LOG_CHUNK: u64 = 4 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Watched {
+    inventories: usize,
+    logs: usize,
+    harvest: Option<usize>,
+}
+
 pub struct Daemon {
     config: Config,
     client: reqwest::Client,
     state: State,
     state_path: PathBuf,
     backoff: Backoff,
+    watched: Option<Watched>,
 }
 
 impl Daemon {
@@ -126,6 +134,7 @@ impl Daemon {
             state,
             state_path,
             backoff,
+            watched: None,
         })
     }
 
@@ -150,8 +159,10 @@ impl Daemon {
         let root = self.config.game.root.clone();
         let mut dirty_state = false;
 
+        let mut inventories = 0;
         match scan(&root) {
             Ok(paths) => {
+                inventories = paths.len();
                 for path in paths {
                     match self.process(&path, &mut report).await {
                         Ok(changed) => dirty_state |= changed,
@@ -161,13 +172,42 @@ impl Daemon {
                     }
                 }
             }
-            Err(err) => tracing::warn!(root = %root.display(), %err, "cannot scan game root"),
+            Err(err) => {
+                tracing::error!(root = %root.display(), %err, "cannot scan game root, nothing will upload")
+            }
         }
 
-        dirty_state |= self.tail_logs(&root, &mut report).await;
+        let (logs_dirty, log_files) = self.tail_logs(&root, &mut report).await;
+        dirty_state |= logs_dirty;
 
+        let mut harvest_files = None;
         if let Some(dir) = self.config.harvest_dir() {
-            dirty_state |= self.harvest_docs(&dir, &mut report).await;
+            let (harvest_dirty, count) = self.harvest_docs(&dir, &mut report).await;
+            dirty_state |= harvest_dirty;
+            harvest_files = Some(count);
+        }
+
+        let watched = Watched {
+            inventories,
+            logs: log_files,
+            harvest: harvest_files,
+        };
+        if self.watched != Some(watched) {
+            match watched.harvest {
+                Some(harvest) => tracing::info!(
+                    inventory_dumps = watched.inventories,
+                    log_files = watched.logs,
+                    harvest_files = harvest,
+                    "watching"
+                ),
+                None => tracing::info!(
+                    inventory_dumps = watched.inventories,
+                    log_files = watched.logs,
+                    harvest = "disabled",
+                    "watching"
+                ),
+            }
+            self.watched = Some(watched);
         }
 
         if report.log_events > 0 || report.log_lines_dropped > 0 {
@@ -247,7 +287,7 @@ impl Daemon {
             Ok(entries) => entries,
             Err(err) => {
                 report.parse_failures += 1;
-                tracing::warn!(file = %file_name, %err, "inventory dump unparsable, retrying next tick");
+                tracing::error!(file = %file_name, %err, "inventory dump unparsable, retrying next tick");
                 return Ok(false);
             }
         };
@@ -260,6 +300,7 @@ impl Daemon {
             raw: Some(contents),
         };
         let entry_count = upload.entries.len();
+        tracing::info!(character = %character, server = %server, entries = entry_count, "uploading inventory");
         let outcome = self.send(self.config.endpoint(), &upload).await;
         let now = unix_secs(SystemTime::now());
 
@@ -285,9 +326,9 @@ impl Daemon {
             Ok(status) => {
                 report.rejections += 1;
                 if status.as_u16() == 401 {
-                    tracing::error!(character = %character, server = %server, "upload rejected: bad machine token, parked until the dump changes");
+                    tracing::error!(character = %character, server = %server, "upload rejected: bad machine token, parked — will not retry until the dump changes");
                 } else {
-                    tracing::error!(character = %character, server = %server, status = status.as_u16(), "upload rejected, parked until the dump changes");
+                    tracing::error!(character = %character, server = %server, status = status.as_u16(), "upload rejected, parked — will not retry until the dump changes");
                 }
                 LastStatus::Rejected {
                     status: status.as_u16(),
@@ -326,14 +367,15 @@ impl Daemon {
         Ok(true)
     }
 
-    async fn tail_logs(&mut self, root: &Path, report: &mut TickReport) -> bool {
+    async fn tail_logs(&mut self, root: &Path, report: &mut TickReport) -> (bool, usize) {
         let paths = match logs::scan(root) {
             Ok(paths) => paths,
             Err(err) => {
                 tracing::warn!(dir = %logs::log_dir(root).display(), %err, "cannot scan log directory");
-                return false;
+                return (false, 0);
             }
         };
+        let count = paths.len();
         let mut dirty = false;
         for path in paths {
             match self.tail(&path, report).await {
@@ -341,7 +383,7 @@ impl Daemon {
                 Err(err) => tracing::warn!(file = %path.display(), %err, "skipping log this tick"),
             }
         }
-        dirty
+        (dirty, count)
     }
 
     /// Delivery is at-least-once: the offset only advances after the batch is
@@ -395,6 +437,7 @@ impl Daemon {
                 events: harvest.events,
             };
             let count = batch.events.len();
+            tracing::info!(character = %character, server = %server, events = count, "uploading log events");
             match self.send(self.config.events_endpoint(), &batch).await {
                 Ok(status) if status.is_success() => {
                     report.log_events += count;
@@ -427,14 +470,15 @@ impl Daemon {
         Ok(true)
     }
 
-    async fn harvest_docs(&mut self, dir: &Path, report: &mut TickReport) -> bool {
+    async fn harvest_docs(&mut self, dir: &Path, report: &mut TickReport) -> (bool, usize) {
         let paths = match harvest::scan(dir) {
             Ok(paths) => paths,
             Err(err) => {
                 tracing::warn!(dir = %dir.display(), %err, "cannot scan harvest directory");
-                return false;
+                return (false, 0);
             }
         };
+        let count = paths.len();
         let mut dirty = false;
         for path in paths {
             match self.harvest_one(&path, report).await {
@@ -444,7 +488,7 @@ impl Daemon {
                 }
             }
         }
-        dirty
+        (dirty, count)
     }
 
     async fn harvest_one(
@@ -516,6 +560,12 @@ impl Daemon {
             captured_at: mtime,
             doc,
         };
+        tracing::info!(
+            character = %identity.character,
+            server = %identity.server,
+            kind = %identity.kind,
+            "uploading harvest doc"
+        );
         let outcome = self.send(self.config.harvest_endpoint(), &upload).await;
         let now = unix_secs(SystemTime::now());
 
@@ -541,7 +591,7 @@ impl Daemon {
             }
             Ok(status) => {
                 report.rejections += 1;
-                tracing::error!(file = %file_name, status = status.as_u16(), "harvest rejected, parked until the file changes");
+                tracing::error!(file = %file_name, status = status.as_u16(), "harvest rejected, parked — will not retry until the file changes");
                 LastStatus::Rejected {
                     status: status.as_u16(),
                 }
