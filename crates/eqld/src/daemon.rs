@@ -121,10 +121,12 @@ pub struct Daemon {
     state_path: PathBuf,
     backoff: Backoff,
     watched: Option<Watched>,
+    installed: Option<crate::tools::Runner>,
     runner: Option<crate::tools::Runner>,
     last_replay: Option<std::time::Instant>,
     overlays: Option<crate::overlays::Supervisor>,
     processes: crate::overlays::ProcessWatch,
+    config_watch: Option<crate::config::Watch>,
 }
 
 impl Daemon {
@@ -174,9 +176,7 @@ impl Daemon {
             .flatten();
         let overlays = installed
             .as_ref()
-            .filter(|_| !plan.wanted.is_empty())
-            .map(|base| crate::overlays::Supervisor::new(base, &plan.wanted, &plan.hidden))
-            .filter(|supervisor| !supervisor.is_empty());
+            .map(|base| crate::overlays::Supervisor::new(base, &plan.wanted, &plan.hidden));
 
         Ok(Self {
             config,
@@ -185,11 +185,100 @@ impl Daemon {
             state_path,
             backoff,
             watched: None,
+            installed,
             runner,
             last_replay: None,
             overlays,
             processes: crate::overlays::ProcessWatch::new(),
+            config_watch: None,
         })
+    }
+
+    /// Re-reads `path` on every tick and applies what can be applied live.
+    pub fn watching(mut self, path: PathBuf) -> Self {
+        self.config_watch = Some(crate::config::Watch::new(path));
+        self
+    }
+
+    async fn reload(&mut self) {
+        let Some(watch) = &mut self.config_watch else {
+            return;
+        };
+        let path = watch.path().to_path_buf();
+        match watch.poll() {
+            None => {}
+            Some(Ok(config)) => {
+                tracing::info!(path = %path.display(), "config changed, applying");
+                self.apply(config).await;
+            }
+            Some(Err(err)) => tracing::error!(
+                path = %path.display(),
+                %err,
+                "config is unusable, staying on the last good one"
+            ),
+        }
+    }
+
+    async fn apply(&mut self, config: Config) {
+        let frozen = self.config.frozen_changes(&config);
+        if !frozen.is_empty() {
+            tracing::warn!(
+                fields = ?frozen,
+                "these fields require a restart; the running values are kept"
+            );
+        }
+        self.config = self.config.hot_swap(config);
+
+        let settings = self.config.tools.log_reader.clone();
+        let plan = crate::overlays::plan(&settings);
+        for refusal in &plan.refused {
+            tracing::warn!(%refusal, "overlay not launched");
+        }
+
+        let asked_for = settings.enabled || !plan.wanted.is_empty();
+        self.installed = asked_for
+            .then(|| crate::tools::Runner::discover(settings.exe.as_deref()))
+            .flatten();
+
+        let replay = settings
+            .replay_enabled()
+            .then(|| self.installed.clone())
+            .flatten();
+        if replay.is_some() != self.runner.is_some() {
+            tracing::info!(
+                enabled = replay.is_some(),
+                atlas = ?settings.atlas,
+                note = crate::overlays::atlas_mode_note(settings.atlas),
+                "replay harvest"
+            );
+            self.last_replay = None;
+        }
+        self.runner = replay;
+
+        let base = self.installed.clone();
+        if base.is_none()
+            && plan.wanted.is_empty()
+            && self
+                .overlays
+                .as_ref()
+                .is_none_or(crate::overlays::Supervisor::is_empty)
+        {
+            return;
+        }
+        let supervisor = self.overlays.get_or_insert_with(Default::default);
+        let changes = supervisor
+            .reconcile(base.as_ref(), &plan.wanted, &plan.hidden)
+            .await;
+        if !changes.missing.is_empty() {
+            tracing::warn!(
+                hint = crate::tools::install_hint(&settings),
+                missing = ?changes.missing,
+                "the log reader does not have these overlays; nothing to start"
+            );
+        }
+        if changes.is_empty() {
+            tracing::info!(overlays = ?supervisor.names(), "no overlay change");
+        }
     }
 
     pub fn runner(&self) -> Option<&crate::tools::Runner> {
@@ -278,6 +367,7 @@ impl Daemon {
     }
 
     pub async fn tick(&mut self) -> TickReport {
+        self.reload().await;
         let mut report = TickReport::default();
         let root = self.config.game.root.clone();
         let mut dirty_state = false;

@@ -290,6 +290,24 @@ fn spawn(runner: &Runner, log: &Path, hidden: bool) -> std::io::Result<Handle> {
     command.spawn().map(|child| Handle::Child(Box::new(child)))
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Changes {
+    pub enabled: Vec<&'static str>,
+    pub disabled: Vec<&'static str>,
+    pub moved: Vec<&'static str>,
+    pub missing: Vec<&'static str>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_empty()
+            && self.disabled.is_empty()
+            && self.moved.is_empty()
+            && self.missing.is_empty()
+    }
+}
+
+#[derive(Default)]
 pub struct Supervisor {
     entries: Vec<Entry>,
     watching: Option<PathBuf>,
@@ -321,6 +339,63 @@ impl Supervisor {
         self.entries.is_empty()
     }
 
+    /// An overlay that is still wanted, still installed and still on the same
+    /// desktop keeps the process it already has.
+    pub async fn reconcile(
+        &mut self,
+        base: Option<&Runner>,
+        wanted: &[Overlay],
+        hidden: &[Overlay],
+    ) -> Changes {
+        let mut changes = Changes::default();
+        let mut previous = std::mem::take(&mut self.entries);
+        let mut kept = Vec::with_capacity(wanted.len());
+        for overlay in wanted {
+            let hide = hidden.contains(overlay);
+            match previous.iter().position(|entry| entry.overlay == *overlay) {
+                Some(at) => {
+                    let mut entry = previous.remove(at);
+                    if entry.hidden != hide {
+                        entry.stop().await;
+                        entry.hidden = hide;
+                        changes.moved.push(overlay.name());
+                        tracing::info!(
+                            overlay = overlay.name(),
+                            hidden = hide && hiding_is_supported(),
+                            "overlay moved desktops, relaunching"
+                        );
+                    }
+                    kept.push(entry);
+                }
+                None => match base.and_then(|base| base.sibling(overlay.stem())) {
+                    Some(runner) => {
+                        kept.push(Entry::new(*overlay, runner, hide));
+                        changes.enabled.push(overlay.name());
+                        tracing::info!(overlay = overlay.name(), hidden = hide, "overlay enabled");
+                    }
+                    None => {
+                        changes.missing.push(overlay.name());
+                        tracing::warn!(
+                            overlay = overlay.name(),
+                            expected = overlay.stem(),
+                            "overlay is not installed, it will not be launched"
+                        );
+                    }
+                },
+            }
+        }
+        for mut entry in previous {
+            entry.stop().await;
+            changes.disabled.push(entry.overlay.name());
+            tracing::info!(overlay = entry.overlay.name(), "overlay disabled");
+        }
+        self.entries = kept;
+        if self.entries.is_empty() {
+            self.watching = None;
+        }
+        changes
+    }
+
     pub fn names(&self) -> Vec<&'static str> {
         self.entries
             .iter()
@@ -344,6 +419,10 @@ impl Supervisor {
     }
 
     pub async fn tick(&mut self, game_running: bool, log: Option<&Path>) {
+        if self.entries.is_empty() {
+            self.watching = None;
+            return;
+        }
         if !game_running {
             if self.watching.is_some() {
                 tracing::info!("the game is gone, stopping overlays");
@@ -745,6 +824,185 @@ mod tests {
             let after = supervisor.entries[0].running.as_ref().unwrap().child.id();
             assert_ne!(before, after, "a fresh process watches the new log");
             assert_eq!(supervisor.watching.as_deref(), Some(second.as_path()));
+        }
+
+        fn suite(dir: &Path) -> Runner {
+            for stem in KNOWN.map(|overlay| overlay.stem()) {
+                std::fs::write(dir.join(format!("{stem}.py")), "").unwrap();
+            }
+            Runner::Source {
+                python: PathBuf::from("/bin/sh"),
+                script: dir.join(format!("{}.py", Overlay::Atlas.stem())),
+            }
+        }
+
+        #[tokio::test]
+        async fn enabling_an_overlay_adds_it_without_touching_the_others() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("eqlog_Dorsk_erudin.txt");
+            std::fs::write(&log, "").unwrap();
+            let base = suite(dir.path());
+            std::fs::write(dir.path().join("eql_dps_meter.py"), "sleep 30\n").unwrap();
+            std::fs::write(dir.path().join("eql_friend_overlay.py"), "sleep 30\n").unwrap();
+
+            let mut supervisor = Supervisor::new(&base, &[Overlay::Dps], &[]);
+            supervisor.tick(true, Some(&log)).await;
+            let before = supervisor.entries[0].running.as_ref().unwrap().child.id();
+
+            let changes = supervisor
+                .reconcile(Some(&base), &[Overlay::Dps, Overlay::Friend], &[])
+                .await;
+            assert_eq!(changes.enabled, vec!["friend"]);
+            assert!(changes.disabled.is_empty());
+            assert_eq!(supervisor.names(), vec!["dps", "friend"]);
+            assert_eq!(
+                supervisor.entries[0].running.as_ref().unwrap().child.id(),
+                before,
+                "the overlay that was already running is left alone"
+            );
+
+            supervisor.tick(true, Some(&log)).await;
+            assert_eq!(supervisor.running(), 2);
+            supervisor.stop().await;
+        }
+
+        #[tokio::test]
+        async fn disabling_an_overlay_stops_it_and_leaves_the_rest_running() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("eqlog_Dorsk_erudin.txt");
+            std::fs::write(&log, "").unwrap();
+            let base = suite(dir.path());
+            std::fs::write(dir.path().join("eql_dps_meter.py"), "sleep 30\n").unwrap();
+            std::fs::write(dir.path().join("eql_friend_overlay.py"), "sleep 30\n").unwrap();
+
+            let mut supervisor = Supervisor::new(&base, &[Overlay::Dps, Overlay::Friend], &[]);
+            supervisor.tick(true, Some(&log)).await;
+            assert_eq!(supervisor.running(), 2);
+            let kept = supervisor.entries[0].running.as_ref().unwrap().child.id();
+
+            let changes = supervisor
+                .reconcile(Some(&base), &[Overlay::Dps], &[])
+                .await;
+            assert_eq!(changes.disabled, vec!["friend"]);
+            assert!(changes.enabled.is_empty());
+            assert_eq!(supervisor.names(), vec!["dps"]);
+            assert_eq!(supervisor.running(), 1);
+            assert_eq!(
+                supervisor.entries[0].running.as_ref().unwrap().child.id(),
+                kept
+            );
+            supervisor.stop().await;
+        }
+
+        #[tokio::test]
+        async fn reconciling_the_same_plan_changes_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("eqlog_Dorsk_erudin.txt");
+            std::fs::write(&log, "").unwrap();
+            let base = suite(dir.path());
+            std::fs::write(dir.path().join("eql_dps_meter.py"), "sleep 30\n").unwrap();
+
+            let mut supervisor = Supervisor::new(&base, &[Overlay::Dps], &[]);
+            supervisor.tick(true, Some(&log)).await;
+            let before = supervisor.entries[0].running.as_ref().unwrap().child.id();
+
+            let changes = supervisor
+                .reconcile(Some(&base), &[Overlay::Dps], &[])
+                .await;
+            assert!(changes.is_empty());
+            assert_eq!(
+                supervisor.entries[0].running.as_ref().unwrap().child.id(),
+                before,
+                "a no-op reload never restarts anything"
+            );
+            supervisor.stop().await;
+        }
+
+        #[tokio::test]
+        async fn hiding_a_running_overlay_relaunches_it_on_the_other_desktop() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("eqlog_Dorsk_erudin.txt");
+            std::fs::write(&log, "").unwrap();
+            let base = suite(dir.path());
+            std::fs::write(dir.path().join("eql_dps_meter.py"), "sleep 30\n").unwrap();
+
+            let mut supervisor = Supervisor::new(&base, &[Overlay::Dps], &[]);
+            supervisor.tick(true, Some(&log)).await;
+            let before = supervisor.entries[0].running.as_ref().unwrap().child.id();
+
+            let changes = supervisor
+                .reconcile(Some(&base), &[Overlay::Dps], &[Overlay::Dps])
+                .await;
+            assert_eq!(changes.moved, vec!["dps"]);
+            assert_eq!(supervisor.hidden(), vec!["dps"]);
+            assert_eq!(supervisor.running(), 0);
+
+            supervisor.tick(true, Some(&log)).await;
+            assert_ne!(
+                supervisor.entries[0].running.as_ref().unwrap().child.id(),
+                before
+            );
+            supervisor.stop().await;
+        }
+
+        #[tokio::test]
+        async fn an_overlay_that_is_not_installed_is_reported_not_added() {
+            let dir = tempfile::tempdir().unwrap();
+            let base = suite(dir.path());
+            std::fs::remove_file(dir.path().join("eql_friend_overlay.py")).unwrap();
+
+            let mut supervisor = Supervisor::default();
+            let changes = supervisor
+                .reconcile(Some(&base), &[Overlay::Friend], &[])
+                .await;
+            assert_eq!(changes.missing, vec!["friend"]);
+            assert!(changes.enabled.is_empty());
+            assert!(supervisor.is_empty());
+
+            let changes = supervisor.reconcile(None, &[Overlay::Dps], &[]).await;
+            assert_eq!(
+                changes.missing,
+                vec!["dps"],
+                "without a log reader nothing can be started either"
+            );
+        }
+
+        #[tokio::test]
+        async fn overlays_are_still_stopped_when_the_log_reader_went_away() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("eqlog_Dorsk_erudin.txt");
+            std::fs::write(&log, "").unwrap();
+            let base = suite(dir.path());
+            std::fs::write(dir.path().join("eql_dps_meter.py"), "sleep 30\n").unwrap();
+
+            let mut supervisor = Supervisor::new(&base, &[Overlay::Dps], &[]);
+            supervisor.tick(true, Some(&log)).await;
+            assert_eq!(supervisor.running(), 1);
+
+            let changes = supervisor.reconcile(None, &[], &[]).await;
+            assert_eq!(changes.disabled, vec!["dps"]);
+            assert!(supervisor.is_empty());
+        }
+
+        #[tokio::test]
+        async fn an_emptied_plan_stops_everything_and_forgets_the_log() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("eqlog_Dorsk_erudin.txt");
+            std::fs::write(&log, "").unwrap();
+            let base = suite(dir.path());
+            std::fs::write(dir.path().join("eql_dps_meter.py"), "sleep 30\n").unwrap();
+
+            let mut supervisor = Supervisor::new(&base, &[Overlay::Dps], &[]);
+            supervisor.tick(true, Some(&log)).await;
+            assert_eq!(supervisor.running(), 1);
+
+            let changes = supervisor.reconcile(Some(&base), &[], &[]).await;
+            assert_eq!(changes.disabled, vec!["dps"]);
+            assert!(supervisor.is_empty());
+            assert!(supervisor.watching.is_none());
+
+            supervisor.tick(true, Some(&log)).await;
+            assert_eq!(supervisor.running(), 0);
         }
 
         #[tokio::test]

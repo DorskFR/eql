@@ -45,6 +45,26 @@ hidden = ["dps"]            # …of which these never appear on screen
 | `hidden` | `[]` | Subset of `overlays` launched on an isolated desktop (Windows only). |
 | `atlas` | `"replay"` | Who keeps the Atlas database: `"replay"` or `"overlay"`. |
 
+### Toggling without a restart
+
+eqld re-reads its config file on every poll tick and applies what it can while
+it runs, so an overlay is switched on or off by editing `overlays` and saving —
+no restart, no touching the scheduled task. Each change is logged
+(`overlay dps enabled`, `overlay friend disabled`), and an overlay that is still
+listed and still healthy is left alone rather than restarted.
+
+| Hot | Restart required |
+|---|---|
+| everything under `[tools.log_reader]`: `enabled`, `exe`, `version`, `replay_secs`, `replay_timeout_secs`, `overlays`, `hidden`, `atlas` | `game.root` |
+| everything under `[harvest]`: `enabled`, `dir` | `game.poll_secs` |
+| | `api.url`, `api.token` |
+| | `state.path` |
+
+A restart-only field that changed is logged as such and the running value is
+kept, so nothing is applied by halves. A config file that does not parse is
+logged once and ignored: the daemon keeps running on the last one that worked,
+and picks up the next edit that fixes it.
+
 ### Item icons
 
 ```sh

@@ -1,5 +1,6 @@
 mod app;
 mod icons;
+mod itemdump;
 mod scrape;
 mod skin;
 mod stats;
@@ -22,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
         Some("scrape") => scrape_command(&args[1..]).await,
         Some("reparse") => reparse_command().await,
+        Some("item-dump") => item_dump_command(&args[1..]).await,
         Some(other) => Err(format!("unknown subcommand {other:?}").into()),
         None => serve().await,
     }
@@ -39,6 +41,14 @@ async fn reparse_command() -> Result<(), Box<dyn std::error::Error>> {
     let pool = connect()?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     scrape::reparse(&pool).await?;
+    pool.close().await;
+    Ok(())
+}
+
+async fn item_dump_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = connect()?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    itemdump::run(&pool, args).await?;
     pool.close().await;
     Ok(())
 }

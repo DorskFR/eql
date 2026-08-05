@@ -150,6 +150,86 @@ impl Config {
     fn api_url(&self, path: &str) -> String {
         format!("{}/api/v1/{path}", self.api.url.trim_end_matches('/'))
     }
+
+    /// Fields a running daemon cannot swap under itself: the state file it
+    /// holds open, the tree it walks, and the endpoint its client posts to.
+    pub fn frozen_changes(&self, next: &Config) -> Vec<&'static str> {
+        let mut frozen = Vec::new();
+        if self.game.root != next.game.root {
+            frozen.push("game.root");
+        }
+        if self.game.poll_secs != next.game.poll_secs {
+            frozen.push("game.poll_secs");
+        }
+        if self.api.url != next.api.url {
+            frozen.push("api.url");
+        }
+        if self.api.token != next.api.token {
+            frozen.push("api.token");
+        }
+        if self.state.path != next.state.path {
+            frozen.push("state.path");
+        }
+        frozen
+    }
+
+    /// Keeps every frozen field of `self`, takes the rest from `next`.
+    pub fn hot_swap(&self, next: Config) -> Config {
+        Config {
+            game: self.game.clone(),
+            api: self.api.clone(),
+            state: self.state.clone(),
+            harvest: next.harvest,
+            tools: next.tools,
+        }
+    }
+}
+
+/// Polls one config file for edits. A file that cannot be read or parsed is
+/// reported once and then stays quiet until its bytes change again, so the
+/// daemon keeps running on the last config that worked.
+pub struct Watch {
+    path: PathBuf,
+    seen: Option<String>,
+}
+
+impl Watch {
+    pub fn new(path: PathBuf) -> Self {
+        let seen = std::fs::read(&path)
+            .ok()
+            .map(|bytes| crate::daemon::bytes_hash(&bytes));
+        Self { path, seen }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// `None` while the file is byte-identical to the last one reported.
+    pub fn poll(&mut self) -> Option<Result<Config, ConfigError>> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(source) => {
+                let first = self.seen.take();
+                return first.map(|_| Err(ConfigError::Read(self.path.clone(), source)));
+            }
+        };
+        let digest = crate::daemon::bytes_hash(&bytes);
+        if self.seen.as_deref() == Some(digest.as_str()) {
+            return None;
+        }
+        self.seen = Some(digest);
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(err) => {
+                return Some(Err(ConfigError::Read(
+                    self.path.clone(),
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+                )));
+            }
+        };
+        Some(toml::from_str(&text).map_err(|source| ConfigError::Parse(self.path.clone(), source)))
+    }
 }
 
 pub fn default_state_path() -> PathBuf {
@@ -443,6 +523,161 @@ mod tests {
         .unwrap();
         assert!(!config.tools.log_reader.enabled);
         assert_eq!(config.harvest_dir(), None);
+    }
+
+    fn write(path: &Path, overlays: &str) {
+        std::fs::write(
+            path,
+            format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                [api]
+                url = "u"
+                token = "t"
+                [tools.log_reader]
+                enabled = true
+                overlays = [{overlays}]
+                "#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_config_that_has_not_changed_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eqld.toml");
+        write(&path, "\"dps\"");
+        let mut watch = Watch::new(path.clone());
+        assert!(watch.poll().is_none());
+
+        write(&path, "\"dps\"");
+        assert!(watch.poll().is_none(), "identical bytes are not a change");
+
+        write(&path, "\"dps\", \"friend\"");
+        let reloaded = watch.poll().unwrap().unwrap();
+        assert_eq!(reloaded.tools.log_reader.overlays, ["dps", "friend"]);
+        assert!(watch.poll().is_none(), "the change is reported once");
+    }
+
+    #[test]
+    fn a_config_written_after_the_watch_started_is_picked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eqld.toml");
+        let mut watch = Watch::new(path.clone());
+        assert_eq!(watch.path(), path);
+        assert!(watch.poll().is_none(), "it was never there to begin with");
+
+        write(&path, "\"dps\"");
+        assert_eq!(
+            watch.poll().unwrap().unwrap().tools.log_reader.overlays,
+            ["dps"]
+        );
+    }
+
+    #[test]
+    fn a_malformed_config_is_reported_once_and_then_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eqld.toml");
+        write(&path, "\"dps\"");
+        let mut watch = Watch::new(path.clone());
+
+        std::fs::write(&path, "overlays = [\"dps\"").unwrap();
+        let err = watch.poll().unwrap().unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(..)), "{err}");
+        assert!(
+            watch.poll().is_none(),
+            "the same broken file is not reported again"
+        );
+
+        write(&path, "\"friend\"");
+        assert_eq!(
+            watch.poll().unwrap().unwrap().tools.log_reader.overlays,
+            ["friend"]
+        );
+    }
+
+    #[test]
+    fn a_config_that_disappears_is_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eqld.toml");
+        write(&path, "\"dps\"");
+        let mut watch = Watch::new(path.clone());
+
+        std::fs::remove_file(&path).unwrap();
+        let err = watch.poll().unwrap().unwrap_err();
+        assert!(matches!(err, ConfigError::Read(..)), "{err}");
+        assert!(watch.poll().is_none(), "a still-missing file stays quiet");
+
+        write(&path, "\"dps\"");
+        assert_eq!(
+            watch.poll().unwrap().unwrap().tools.log_reader.overlays,
+            ["dps"]
+        );
+    }
+
+    #[test]
+    fn only_the_fields_a_running_daemon_can_swap_are_taken_from_a_reload() {
+        let before: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            poll_secs = 5
+            [api]
+            url = "https://a"
+            token = "t"
+            [state]
+            path = "a.json"
+            [tools.log_reader]
+            overlays = ["dps"]
+            "#,
+        )
+        .unwrap();
+        let after: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/other"
+            poll_secs = 30
+            [api]
+            url = "https://b"
+            token = "u"
+            [state]
+            path = "b.json"
+            [harvest]
+            enabled = true
+            [tools.log_reader]
+            enabled = true
+            overlays = ["dps", "friend"]
+            hidden = ["friend"]
+            atlas = "overlay"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            before.frozen_changes(&after),
+            vec![
+                "game.root",
+                "game.poll_secs",
+                "api.url",
+                "api.token",
+                "state.path"
+            ]
+        );
+        assert!(before.frozen_changes(&before.clone()).is_empty());
+
+        let merged = before.hot_swap(after);
+        assert_eq!(merged.game.root, PathBuf::from("/games/eq"));
+        assert_eq!(merged.game.poll_secs, 5);
+        assert_eq!(merged.api.url, "https://a");
+        assert_eq!(merged.api.token, "t");
+        assert_eq!(merged.state_path(), PathBuf::from("a.json"));
+        assert!(merged.harvest.enabled);
+        assert!(merged.tools.log_reader.enabled);
+        assert_eq!(merged.tools.log_reader.overlays, ["dps", "friend"]);
+        assert_eq!(merged.tools.log_reader.hidden, ["friend"]);
+        assert_eq!(merged.tools.log_reader.atlas, AtlasMode::Overlay);
     }
 
     #[test]

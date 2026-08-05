@@ -1,5 +1,6 @@
 use crate::{
     icons::{self, IconError},
+    itemdump::{self, DumpIcon},
     skin::{self, SkinError},
     stats::{derive_gear_stats, is_equipped_location, GearStats},
     wiki::ItemStats,
@@ -526,6 +527,8 @@ struct ItemRecord {
     stats: serde_json::Value,
     #[serde(with = "time::serde::rfc3339")]
     scraped_at: OffsetDateTime,
+    #[serde(skip)]
+    from_dump: bool,
 }
 
 fn item_from_row(row: &sqlx::postgres::PgRow) -> Result<ItemRecord, sqlx::Error> {
@@ -536,7 +539,26 @@ fn item_from_row(row: &sqlx::postgres::PgRow) -> Result<ItemRecord, sqlx::Error>
         name: row.try_get("name")?,
         stats: stats.0,
         scraped_at: row.try_get("scraped_at")?,
+        from_dump: false,
     })
+}
+
+/// Stands up a record with no `items` row behind it: the dump knows a name and
+/// an icon and nothing else, so `from_dump` keeps it out of the stat totals.
+fn item_from_dump(found: &DumpIcon) -> ItemRecord {
+    let stats = ItemStats {
+        name: found.name.clone(),
+        icon: Some(found.icon.into()),
+        ..Default::default()
+    };
+    ItemRecord {
+        id: 0,
+        game_id: Some(found.game_id),
+        name: found.name.clone(),
+        stats: serde_json::to_value(stats).expect("item stats serialise to json"),
+        scraped_at: OffsetDateTime::UNIX_EPOCH,
+        from_dump: true,
+    }
 }
 
 /// Wiki item pages carry no in-game item id, so the join is by folded name.
@@ -650,7 +672,7 @@ async fn join_items(
     names.dedup();
     let items = items_by_name(pool, &names).await?;
 
-    Ok(entries
+    let mut views: Vec<InventoryEntryView> = entries
         .into_iter()
         .map(|entry| {
             let (item, upgrade) = resolve_item(&items, &entry.name);
@@ -660,7 +682,63 @@ async fn join_items(
                 entry,
             }
         })
-        .collect())
+        .collect();
+    fill_dump_icons(pool, &mut views).await?;
+    Ok(views)
+}
+
+fn wants_dump_icon(view: &InventoryEntryView) -> bool {
+    !view.entry.is_empty_slot()
+        && view.item.as_ref().is_none_or(|item| {
+            item.stats
+                .get("icon")
+                .is_none_or(serde_json::Value::is_null)
+        })
+}
+
+async fn fill_dump_icons(
+    pool: &PgPool,
+    views: &mut [InventoryEntryView],
+) -> Result<(), sqlx::Error> {
+    let mut keys: Vec<String> = views
+        .iter()
+        .filter(|view| wants_dump_icon(view))
+        .flat_map(|view| {
+            name_candidates(&view.entry.name)
+                .into_iter()
+                .map(|(candidate, _)| itemdump::name_key(&candidate))
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+
+    let dump = itemdump::lookup(pool, &keys).await?;
+    if dump.is_empty() {
+        return Ok(());
+    }
+    for view in views.iter_mut().filter(|view| wants_dump_icon(view)) {
+        let found = name_candidates(&view.entry.name)
+            .into_iter()
+            .find_map(|(candidate, level)| {
+                dump.get(&itemdump::name_key(&candidate))
+                    .map(|found| (found, level))
+            });
+        let Some((found, level)) = found else {
+            continue;
+        };
+        match view.item.as_mut() {
+            Some(item) => {
+                if let Some(stats) = item.stats.as_object_mut() {
+                    stats.insert("icon".into(), found.icon.into());
+                }
+            }
+            None => {
+                view.item = Some(item_from_dump(found));
+                view.upgrade = level;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn latest_inventory(
@@ -699,6 +777,7 @@ async fn character_stats(
             let stats = view
                 .item
                 .as_ref()
+                .filter(|item| !item.from_dump)
                 .and_then(|item| serde_json::from_value(item.stats.clone()).ok());
             (view.entry.clone(), stats)
         })
@@ -1743,6 +1822,7 @@ mod tests {
             name: name.to_string(),
             stats: serde_json::json!({}),
             scraped_at: OffsetDateTime::UNIX_EPOCH,
+            from_dump: false,
         }
     }
 
@@ -1842,6 +1922,112 @@ mod tests {
         assert_eq!(stats["stats"]["mana"], 25);
         assert_eq!(stats["stats"]["known_items"], 2);
         assert_eq!(stats["stats"]["unknown_items"], 1);
+    }
+
+    #[tokio::test]
+    async fn the_item_dump_fills_icons_the_wiki_has_no_page_for() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+        sqlx::query("truncate item_icon_names")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let path = std::env::temp_dir().join("eqls-item-dump-test.sql");
+        std::fs::write(&path, crate::itemdump::SAMPLE).unwrap();
+        let load = |path: &std::path::Path| vec!["--file".to_string(), path.display().to_string()];
+        let summary = crate::itemdump::run(&pool, &load(&path)).await.unwrap();
+        assert_eq!(summary.rows, 8);
+        assert_eq!(summary.loaded, 5);
+        assert_eq!(summary.skipped, 3);
+        assert_eq!(
+            crate::itemdump::run(&pool, &load(&path)).await.unwrap(),
+            summary,
+            "re-running the loader is idempotent"
+        );
+        std::fs::remove_file(&path).unwrap();
+
+        for (name, icon) in [("Spirit Reaver", Some(576)), ("Cloth Cap", None)] {
+            sqlx::query(
+                "insert into items (name, stats, wikitext) values ($1, $2, '') \
+                 on conflict (name) do update set stats = excluded.stats",
+            )
+            .bind(name)
+            .bind(SqlJson(
+                serde_json::to_value(ItemStats {
+                    name: name.to_string(),
+                    icon,
+                    ac: Some(4),
+                    ..Default::default()
+                })
+                .unwrap(),
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let upload = r#"{"character":"Dorsk","server":"erudin","entries":[
+            {"location":"Waist","name":"Small Bronze Girdle +2","id":3256,"count":1,"slots":10},
+            {"location":"Primary","name":"Spirit Reaver","id":2578,"count":1,"slots":10},
+            {"location":"Head","name":"Cloth Cap*","id":1001,"count":1,"slots":10},
+            {"location":"Feet","name":"Nothing Knows This","id":7,"count":1,"slots":10},
+            {"location":"Neck","name":"Empty","id":0,"count":0,"slots":0}]}"#;
+        let (status, _) = json_of(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/inventory")
+                .header("authorization", "Bearer s3cret")
+                .header("content-type", "application/json")
+                .body(Body::from(upload))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, inventory) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Dorsk/inventory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = inventory["entries"].as_array().unwrap();
+
+        assert_eq!(entries[0]["item"]["stats"]["icon"], 549, "no wiki page");
+        assert_eq!(entries[0]["item"]["name"], "Small Bronze Girdle");
+        assert_eq!(entries[0]["item"]["game_id"], 3256);
+        assert_eq!(entries[0]["upgrade"], 2, "the decoration still peels");
+        assert_eq!(entries[1]["item"]["stats"]["icon"], 576, "the wiki wins");
+        assert_eq!(entries[1]["item"]["stats"]["ac"], 4);
+        assert_eq!(
+            entries[2]["item"]["stats"]["icon"], 639,
+            "a wiki page with no icon takes the dump's"
+        );
+        assert_eq!(entries[2]["item"]["stats"]["ac"], 4, "wiki stats survive");
+        assert!(
+            entries[3]["item"].is_null(),
+            "unknown to both stays unknown"
+        );
+        assert!(entries[4]["item"].is_null());
+
+        let (_, stats) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Dorsk/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(stats["stats"]["ac"], 8);
+        assert_eq!(stats["stats"]["known_items"], 2);
+        assert_eq!(
+            stats["stats"]["unknown_items"], 2,
+            "an icon alone is not knowing the item"
+        );
     }
 
     /// A bad route pattern only panics when the `Router` is assembled, so this
