@@ -1,5 +1,6 @@
 use eqld::{config::Config, daemon::Daemon, skin};
 use std::path::PathBuf;
+use tracing_subscriber::EnvFilter;
 
 const SUBCOMMANDS: &[&str] = &["install-skin"];
 
@@ -19,7 +20,11 @@ fn split_args(args: Vec<String>) -> (PathBuf, Vec<String>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
     let (path, rest) = split_args(std::env::args().skip(1).collect());
     let config = Config::load(&path)?;
