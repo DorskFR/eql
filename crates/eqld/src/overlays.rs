@@ -577,12 +577,15 @@ mod tests {
     mod supervision {
         use super::*;
 
+        /// Interpreted, not executed: a sibling test forking while this file is
+        /// still open for writing fails the exec with ETXTBSY.
         fn script(dir: &Path, name: &str, body: &str) -> Runner {
-            use std::os::unix::fs::PermissionsExt;
             let path = dir.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Runner::Frozen(path)
+            std::fs::write(&path, format!("{body}\n")).unwrap();
+            Runner::Source {
+                python: PathBuf::from("/bin/sh"),
+                script: path,
+            }
         }
 
         fn supervisor(runner: Runner) -> Supervisor {
