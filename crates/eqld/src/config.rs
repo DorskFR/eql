@@ -48,7 +48,15 @@ impl Config {
     }
 
     pub fn endpoint(&self) -> String {
-        format!("{}/api/v1/inventory", self.api.url.trim_end_matches('/'))
+        self.api_url("inventory")
+    }
+
+    pub fn events_endpoint(&self) -> String {
+        self.api_url("events")
+    }
+
+    fn api_url(&self, path: &str) -> String {
+        format!("{}/api/v1/{path}", self.api.url.trim_end_matches('/'))
     }
 }
 
@@ -107,6 +115,10 @@ mod tests {
         assert_eq!(config.game.poll_secs, 30);
         assert_eq!(config.state_path(), PathBuf::from("state.json"));
         assert_eq!(config.endpoint(), "http://localhost:8080/api/v1/inventory");
+        assert_eq!(
+            config.events_endpoint(),
+            "http://localhost:8080/api/v1/events"
+        );
     }
 
     #[test]

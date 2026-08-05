@@ -1,11 +1,17 @@
 use crate::{
     backoff::Backoff,
     config::Config,
-    state::{FileState, LastStatus, State},
+    logs,
+    state::{FileState, LastStatus, LogState, State},
 };
-use eql_core::{api::InventoryUpload, inventory};
+use eql_core::{
+    api::{InventoryUpload, LogBatch},
+    inventory,
+};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -87,7 +93,13 @@ pub struct TickReport {
     pub parse_failures: usize,
     pub retryable_failures: usize,
     pub rejections: usize,
+    pub log_events: usize,
+    pub log_lines_dropped: usize,
 }
+
+/// One tick reads at most this much of each log; the rest waits for the next
+/// tick so a long-idle daemon cannot pull a whole session into memory.
+const MAX_LOG_CHUNK: u64 = 4 * 1024 * 1024;
 
 pub struct Daemon {
     config: Config,
@@ -134,20 +146,30 @@ impl Daemon {
     pub async fn tick(&mut self) -> TickReport {
         let mut report = TickReport::default();
         let root = self.config.game.root.clone();
-        let paths = match scan(&root) {
-            Ok(paths) => paths,
-            Err(err) => {
-                tracing::warn!(root = %root.display(), %err, "cannot scan game root");
-                return report;
-            }
-        };
-
         let mut dirty_state = false;
-        for path in paths {
-            match self.process(&path, &mut report).await {
-                Ok(changed) => dirty_state |= changed,
-                Err(err) => tracing::warn!(file = %path.display(), %err, "skipping file this tick"),
+
+        match scan(&root) {
+            Ok(paths) => {
+                for path in paths {
+                    match self.process(&path, &mut report).await {
+                        Ok(changed) => dirty_state |= changed,
+                        Err(err) => {
+                            tracing::warn!(file = %path.display(), %err, "skipping file this tick")
+                        }
+                    }
+                }
             }
+            Err(err) => tracing::warn!(root = %root.display(), %err, "cannot scan game root"),
+        }
+
+        dirty_state |= self.tail_logs(&root, &mut report).await;
+
+        if report.log_events > 0 || report.log_lines_dropped > 0 {
+            tracing::info!(
+                events = report.log_events,
+                dropped_lines = report.log_lines_dropped,
+                "harvested log events"
+            );
         }
 
         if dirty_state {
@@ -232,7 +254,7 @@ impl Daemon {
             raw: Some(contents),
         };
         let entry_count = upload.entries.len();
-        let outcome = self.send(&upload).await;
+        let outcome = self.send(self.config.endpoint(), &upload).await;
         let now = unix_secs(SystemTime::now());
 
         let last_status = match &outcome {
@@ -298,11 +320,116 @@ impl Daemon {
         Ok(true)
     }
 
-    async fn send(&self, upload: &InventoryUpload) -> reqwest::Result<reqwest::StatusCode> {
+    async fn tail_logs(&mut self, root: &Path, report: &mut TickReport) -> bool {
+        let paths = match logs::scan(root) {
+            Ok(paths) => paths,
+            Err(err) => {
+                tracing::warn!(dir = %logs::log_dir(root).display(), %err, "cannot scan log directory");
+                return false;
+            }
+        };
+        let mut dirty = false;
+        for path in paths {
+            match self.tail(&path, report).await {
+                Ok(changed) => dirty |= changed,
+                Err(err) => tracing::warn!(file = %path.display(), %err, "skipping log this tick"),
+            }
+        }
+        dirty
+    }
+
+    /// Delivery is at-least-once: the offset only advances after the batch is
+    /// accepted, so a failed post replays the same lines on the next tick.
+    async fn tail(&mut self, path: &Path, report: &mut TickReport) -> Result<bool, std::io::Error> {
+        let Some(file_name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(String::from)
+        else {
+            return Ok(false);
+        };
+        let Some((character, server)) = logs::parse_filename(&file_name) else {
+            return Ok(false);
+        };
+        let len = std::fs::metadata(path)?.len();
+
+        let Some(previous) = self.state.logs.get(&file_name).copied() else {
+            self.state.logs.insert(file_name, LogState { offset: len });
+            tracing::info!(character = %character, server = %server, offset = len, "tailing log from its end");
+            return Ok(true);
+        };
+
+        let mut offset = previous.offset;
+        let mut dirty = false;
+        if offset > len {
+            tracing::info!(character = %character, server = %server, "log rotated or truncated, reading from the top");
+            offset = 0;
+            dirty = true;
+        }
+
+        let mut chunk = Vec::new();
+        if offset < len {
+            let mut file = std::fs::File::open(path)?;
+            file.seek(SeekFrom::Start(offset))?;
+            file.take(MAX_LOG_CHUNK).read_to_end(&mut chunk)?;
+        }
+        let (harvest, consumed) = logs::harvest(&chunk);
+        if consumed == 0 {
+            if dirty {
+                self.state.logs.insert(file_name, LogState { offset });
+            }
+            return Ok(dirty);
+        }
+        report.log_lines_dropped += harvest.dropped;
+
+        if !harvest.events.is_empty() {
+            let batch = LogBatch {
+                character: character.clone(),
+                server: server.clone(),
+                events: harvest.events,
+            };
+            let count = batch.events.len();
+            match self.send(self.config.events_endpoint(), &batch).await {
+                Ok(status) if status.is_success() => {
+                    report.log_events += count;
+                    tracing::info!(character = %character, server = %server, events = count, "uploaded log events");
+                }
+                Ok(status) if status.is_server_error() => {
+                    report.retryable_failures += 1;
+                    tracing::warn!(character = %character, server = %server, status = status.as_u16(), "log events rejected by server error, replaying next tick");
+                    return Ok(dirty);
+                }
+                Ok(status) => {
+                    report.rejections += 1;
+                    tracing::error!(character = %character, server = %server, status = status.as_u16(), "log events rejected, replaying next tick");
+                    return Ok(dirty);
+                }
+                Err(err) => {
+                    report.retryable_failures += 1;
+                    tracing::warn!(character = %character, server = %server, %err, "log event upload failed, replaying next tick");
+                    return Ok(dirty);
+                }
+            }
+        }
+
+        self.state.logs.insert(
+            file_name,
+            LogState {
+                offset: offset + consumed as u64,
+            },
+        );
+        Ok(true)
+    }
+
+    async fn send<T: Serialize>(
+        &self,
+        url: String,
+        body: &T,
+    ) -> reqwest::Result<reqwest::StatusCode> {
         self.client
-            .post(self.config.endpoint())
+            .post(url)
             .bearer_auth(&self.config.api.token)
-            .json(upload)
+            .json(body)
             .send()
             .await
             .map(|response| response.status())

@@ -14,6 +14,62 @@ pub struct InventoryUpload {
     pub raw: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogBatch {
+    pub character: String,
+    pub server: String,
+    pub events: Vec<LogEvent>,
+}
+
+/// `at` is unix seconds derived from the line's own timestamp, which the client
+/// writes in local time with no offset; see `eqld::logs::parse_timestamp`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogEvent {
+    pub at: i64,
+    #[serde(flatten)]
+    pub kind: LogEventKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LogEventKind {
+    Loot {
+        item: String,
+    },
+    Level {
+        level: u32,
+    },
+    Zone {
+        zone: String,
+    },
+    Death {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        killer: Option<String>,
+    },
+    Location {
+        y: f64,
+        x: f64,
+        z: f64,
+    },
+    Skill {
+        skill: String,
+        value: u32,
+    },
+}
+
+impl LogEventKind {
+    pub fn tag(&self) -> &'static str {
+        match self {
+            LogEventKind::Loot { .. } => "loot",
+            LogEventKind::Level { .. } => "level",
+            LogEventKind::Zone { .. } => "zone",
+            LogEventKind::Death { .. } => "death",
+            LogEventKind::Location { .. } => "location",
+            LogEventKind::Skill { .. } => "skill",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +111,61 @@ mod tests {
         assert_eq!(upload.captured_at, Some(1_754_390_000));
         assert_eq!(upload.entries[0].slots, 8);
         assert!(upload.raw.is_some());
+    }
+
+    #[test]
+    fn events_serialise_flat_with_a_kind_tag() {
+        let batch = LogBatch {
+            character: "Dorsk".into(),
+            server: "erudin".into(),
+            events: vec![
+                LogEvent {
+                    at: 1_753_132_523,
+                    kind: LogEventKind::Loot {
+                        item: "Rusty Dagger".into(),
+                    },
+                },
+                LogEvent {
+                    at: 1_753_132_530,
+                    kind: LogEventKind::Death { killer: None },
+                },
+            ],
+        };
+        let json = serde_json::to_value(&batch).unwrap();
+        assert_eq!(json["events"][0]["kind"], "loot");
+        assert_eq!(json["events"][0]["item"], "Rusty Dagger");
+        assert_eq!(json["events"][0]["at"], 1_753_132_523);
+        assert_eq!(json["events"][1]["kind"], "death");
+        assert!(json["events"][1].get("killer").is_none());
+        assert_eq!(
+            serde_json::from_value::<LogBatch>(json).unwrap().events,
+            batch.events
+        );
+    }
+
+    #[test]
+    fn every_kind_round_trips_and_tags_itself() {
+        let kinds = [
+            LogEventKind::Loot { item: "x".into() },
+            LogEventKind::Level { level: 42 },
+            LogEventKind::Zone { zone: "z".into() },
+            LogEventKind::Death {
+                killer: Some("a gnoll".into()),
+            },
+            LogEventKind::Location {
+                y: 1.5,
+                x: -2.0,
+                z: 0.25,
+            },
+            LogEventKind::Skill {
+                skill: "Meditate".into(),
+                value: 7,
+            },
+        ];
+        for kind in kinds {
+            let json = serde_json::to_value(&kind).unwrap();
+            assert_eq!(json["kind"], kind.tag());
+            assert_eq!(serde_json::from_value::<LogEventKind>(json).unwrap(), kind);
+        }
     }
 }
