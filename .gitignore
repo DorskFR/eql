@@ -1,0 +1,8 @@
+/target
+*.zip
+.env
+.qa/
+tmp/
+node_modules/
+/ARCHITECTURE.md
+/equi/
