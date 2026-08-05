@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "eql-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "eqld"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "axum",
  "dirs",
@@ -376,12 +376,13 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
 [[package]]
 name = "eqls"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "axum",
  "eql-core",

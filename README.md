@@ -31,21 +31,53 @@ token = "…"
 [tools.log_reader]
 enabled = true              # harvest headlessly via `eql_atlas --replay`
 overlays = ["dps"]          # in-game windows to launch alongside it
+hidden = ["dps"]            # …of which these never appear on screen
 ```
 
 | Key | Default | What |
 |---|---|---|
-| `enabled` | `false` | Run `eql_atlas --replay` each tick and ship the JSON it writes. Windowless. |
+| `enabled` | `false` | Ship the JSON the reader writes, and (in `atlas = "replay"`) run `eql_atlas --replay` each tick. |
 | `exe` | discovered | Path to `eql_atlas`; the other tools are found next to it. |
 | `version` | `v2.0` | Upstream release `install-tools` fetches. |
 | `replay_secs` | `120` | Seconds between replays (min 10). |
 | `replay_timeout_secs` | `600` | Kill a replay that outlives this (min 10). |
 | `overlays` | `[]` | GUI overlays to supervise: `dps`, `session_report`, `friend`, `atlas`. |
+| `hidden` | `[]` | Subset of `overlays` launched on an isolated desktop (Windows only). |
+| `atlas` | `"replay"` | Who keeps the Atlas database: `"replay"` or `"overlay"`. |
 
 Overlays start when `eqgame.exe` appears, are pointed at the character log the
 client is currently writing, are restarted with backoff if they die, and are
 stopped when the game exits or eqld shuts down. Switching character in-game
 repoints them at the new log.
 
-`atlas` is refused while `enabled = true`: the Atlas overlay autosaves its
-database and would fight the concurrent `--replay`. Run one or the other.
+### Lifetime stats without a window on screen
+
+An overlay listed in `hidden` is launched on a desktop eqld creates for itself,
+so its window is never drawn while its parser ticks normally. Naming an overlay
+that is not in `overlays` is refused, and so is hiding `atlas`. On anything but
+Windows there are no desktops to hide behind: eqld warns once and launches it
+like any other overlay.
+
+This is what makes `alltime` (the DPS meter's per-build lifetime stats) accrue
+at all — the meter only writes that file while it is running. **It never
+backfills.** At startup it snapshots a baseline and counts only what it sees
+live, so every minute the game runs without the meter is lost for good. Hide it
+and leave it running.
+
+A character with two class builds writes one `alltime` file per build. The API
+keeps a single document per character and kind, so eqld merges them into one
+`{"builds": {"WAR-CLR": …, "WAR-SHM": …}}` document. A file the reader wrote
+before `/who` revealed the class combo has no build name and ships flat.
+
+### Quests
+
+`atlas = "replay"` (the default) runs the headless `--replay` tick and refuses
+the `atlas` overlay: the overlay autosaves its database and the two would fight.
+This mode writes **no quest data at all** — upstream's replay path never builds
+any quest state.
+
+`atlas = "overlay"` is the other way round: the replay tick is skipped entirely
+and the Atlas overlay runs, keeping its own database live. This is the only way
+to get quest progress, and it needs you: the Atlas only credits quests you added
+by hand in its quest window, so the overlay must stay visible. eqld logs which
+mode is active at startup.

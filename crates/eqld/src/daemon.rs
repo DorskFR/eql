@@ -133,12 +133,26 @@ impl Daemon {
         let state = State::load(&state_path).map_err(DaemonError::State)?;
         let backoff = Backoff::new(config.poll_interval());
         let settings = &config.tools.log_reader;
-        let (wanted, refused) = crate::overlays::plan(&settings.overlays, settings.enabled);
-        for refusal in refused {
+        let plan = crate::overlays::plan(settings);
+        for refusal in &plan.refused {
             tracing::warn!(%refusal, "overlay not launched");
         }
+        if !plan.hidden.is_empty() && !crate::overlays::hiding_is_supported() {
+            tracing::warn!(
+                hidden = ?plan.hidden.iter().map(|overlay| overlay.name()).collect::<Vec<_>>(),
+                "hiding an overlay needs windows; these will be launched normally"
+            );
+        }
 
-        let asked_for = settings.enabled || !wanted.is_empty();
+        let asked_for = settings.enabled || !plan.wanted.is_empty();
+        if asked_for {
+            tracing::info!(
+                atlas = ?settings.atlas,
+                note = crate::overlays::atlas_mode_note(settings.atlas),
+                replay = settings.replay_enabled(),
+                "atlas mode"
+            );
+        }
         let installed = asked_for
             .then(|| crate::tools::Runner::discover(settings.exe.as_deref()))
             .flatten();
@@ -146,15 +160,18 @@ impl Daemon {
             tracing::warn!(
                 hint = crate::tools::install_hint(settings),
                 harvest = settings.enabled,
-                overlays = ?wanted.iter().map(|o| o.name()).collect::<Vec<_>>(),
+                overlays = ?plan.wanted.iter().map(|o| o.name()).collect::<Vec<_>>(),
                 "log reader not found; nothing will be harvested and no overlay can start"
             );
         }
-        let runner = settings.enabled.then(|| installed.clone()).flatten();
+        let runner = settings
+            .replay_enabled()
+            .then(|| installed.clone())
+            .flatten();
         let overlays = installed
             .as_ref()
-            .filter(|_| !wanted.is_empty())
-            .map(|base| crate::overlays::Supervisor::new(base, &wanted))
+            .filter(|_| !plan.wanted.is_empty())
+            .map(|base| crate::overlays::Supervisor::new(base, &plan.wanted, &plan.hidden))
             .filter(|supervisor| !supervisor.is_empty());
 
         Ok(Self {
@@ -230,6 +247,13 @@ impl Daemon {
         self.overlays
             .as_ref()
             .map(crate::overlays::Supervisor::names)
+            .unwrap_or_default()
+    }
+
+    pub fn hidden_overlays(&self) -> Vec<&'static str> {
+        self.overlays
+            .as_ref()
+            .map(crate::overlays::Supervisor::hidden)
             .unwrap_or_default()
     }
 
@@ -578,35 +602,34 @@ impl Daemon {
         };
         let count = paths.len();
         let mut dirty = false;
-        for path in paths {
-            match self.harvest_one(&path, report).await {
+        for group in harvest::group(paths) {
+            match self.harvest_group(&group, report).await {
                 Ok(changed) => dirty |= changed,
                 Err(err) => {
-                    tracing::warn!(file = %path.display(), %err, "skipping harvest file this tick")
+                    tracing::warn!(file = %group.key, %err, "skipping harvest file this tick")
                 }
             }
         }
         (dirty, count)
     }
 
-    async fn harvest_one(
+    async fn harvest_group(
         &mut self,
-        path: &Path,
+        group: &harvest::Group,
         report: &mut TickReport,
     ) -> Result<bool, std::io::Error> {
-        let Some(file_name) = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(String::from)
-        else {
-            return Ok(false);
-        };
-        let Some(identity) = harvest::parse_filename(&file_name) else {
-            return Ok(false);
-        };
-        let metadata = std::fs::metadata(path)?;
-        let len = metadata.len();
-        let mtime = metadata.modified().ok().and_then(unix_secs);
+        let file_name = group.key.clone();
+        let mut len = 0;
+        let mut mtime = None;
+        // Hashed whole every tick, unlike inventory: a same-second rewrite of
+        // equal length slips past an mtime+len gate, and these files are capped.
+        let mut contents = Vec::new();
+        for (path, _) in &group.files {
+            let metadata = std::fs::metadata(path)?;
+            len += metadata.len();
+            mtime = mtime.max(metadata.modified().ok().and_then(unix_secs));
+            contents.push(std::fs::read_to_string(path)?);
+        }
 
         if len > harvest::MAX_BYTES {
             report.harvest_skipped += 1;
@@ -618,10 +641,7 @@ impl Daemon {
             );
             return Ok(false);
         }
-        // Hashed whole every tick, unlike inventory: a same-second rewrite of
-        // equal length slips past an mtime+len gate, and these files are capped.
-        let contents = std::fs::read_to_string(path)?;
-        let hash = content_hash(&contents);
+        let hash = content_hash(&contents.concat());
         match decide(self.state.harvest.get(&file_name), &hash) {
             Decision::SkipAlreadyUploaded => {
                 report.harvest_skipped += 1;
@@ -642,26 +662,30 @@ impl Daemon {
             Decision::Upload => {}
         }
 
-        let doc: serde_json::Value = match serde_json::from_str(&contents) {
-            Ok(doc) => doc,
-            Err(err) => {
-                report.parse_failures += 1;
-                tracing::warn!(file = %file_name, %err, "harvest file is not json yet, retrying next tick");
-                return Ok(false);
+        let mut docs = Vec::with_capacity(contents.len());
+        for text in &contents {
+            match serde_json::from_str(text) {
+                Ok(doc) => docs.push(doc),
+                Err(err) => {
+                    report.parse_failures += 1;
+                    tracing::warn!(file = %file_name, %err, "harvest file is not json yet, retrying next tick");
+                    return Ok(false);
+                }
             }
-        };
+        }
 
         let upload = HarvestDoc {
-            character: identity.character.clone(),
-            server: identity.server.clone(),
-            kind: identity.kind.clone(),
+            character: group.character.clone(),
+            server: group.server.clone(),
+            kind: group.kind.clone(),
             captured_at: mtime,
-            doc,
+            doc: group.document(docs),
         };
         tracing::info!(
-            character = %identity.character,
-            server = %identity.server,
-            kind = %identity.kind,
+            character = %group.character,
+            server = %group.server,
+            kind = %group.kind,
+            files = group.files.len(),
             "uploading harvest doc"
         );
         let outcome = self.send(self.config.harvest_endpoint(), &upload).await;
@@ -671,10 +695,10 @@ impl Daemon {
             Ok(status) if status.is_success() => {
                 report.harvested += 1;
                 tracing::info!(
-                    character = %identity.character,
-                    server = %identity.server,
-                    kind = %identity.kind,
-                    build = identity.build.as_deref().unwrap_or("-"),
+                    character = %group.character,
+                    server = %group.server,
+                    kind = %group.kind,
+                    builds = ?group.files.iter().filter_map(|(_, build)| build.as_deref()).collect::<Vec<_>>(),
                     status = status.as_u16(),
                     "uploaded harvest doc"
                 );

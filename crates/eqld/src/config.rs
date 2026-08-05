@@ -31,9 +31,28 @@ pub struct LogReaderConfig {
     pub replay_timeout_secs: u64,
     #[serde(default)]
     pub overlays: Vec<String>,
+    /// A subset of `overlays`, launched on an isolated Windows desktop.
+    #[serde(default)]
+    pub hidden: Vec<String>,
+    #[serde(default)]
+    pub atlas: AtlasMode,
+}
+
+/// Who keeps the Atlas database: the headless `--replay` tick, or a live Atlas
+/// overlay. Only the overlay tracks quests, and only if a human curates them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AtlasMode {
+    #[default]
+    Replay,
+    Overlay,
 }
 
 impl LogReaderConfig {
+    pub fn replay_enabled(&self) -> bool {
+        self.enabled && self.atlas == AtlasMode::Replay
+    }
+
     pub fn version(&self) -> &str {
         self.version
             .as_deref()
@@ -324,12 +343,80 @@ mod tests {
         .unwrap();
         assert_eq!(config.tools.log_reader.overlays, ["dps", "session_report"]);
         assert_eq!(
-            crate::overlays::plan(&config.tools.log_reader.overlays, true).0,
+            crate::overlays::plan(&config.tools.log_reader).wanted,
             vec![
                 crate::overlays::Overlay::Dps,
                 crate::overlays::Overlay::SessionReport
             ]
         );
+    }
+
+    #[test]
+    fn the_atlas_is_kept_by_replay_unless_the_overlay_is_asked_for() {
+        let with = |mode: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                [api]
+                url = "u"
+                token = "t"
+                [tools.log_reader]
+                enabled = true
+                overlays = ["atlas"]
+                {mode}
+                "#
+            ))
+            .unwrap()
+        };
+        let default = with("");
+        assert_eq!(default.tools.log_reader.atlas, AtlasMode::Replay);
+        assert!(default.tools.log_reader.replay_enabled());
+
+        let overlay = with(r#"atlas = "overlay""#);
+        assert_eq!(overlay.tools.log_reader.atlas, AtlasMode::Overlay);
+        assert!(!overlay.tools.log_reader.replay_enabled());
+        assert!(
+            overlay.harvest_dir().is_some(),
+            "the files are still shipped"
+        );
+    }
+
+    #[test]
+    fn hidden_overlays_are_read_and_default_to_none() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [tools.log_reader]
+            enabled = true
+            overlays = ["dps"]
+            hidden = ["dps"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.tools.log_reader.hidden, ["dps"]);
+        assert_eq!(
+            crate::overlays::plan(&config.tools.log_reader).hidden,
+            vec![crate::overlays::Overlay::Dps]
+        );
+
+        let bare: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [tools.log_reader]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        assert!(bare.tools.log_reader.hidden.is_empty());
     }
 
     #[test]

@@ -197,9 +197,14 @@ export function projectQuest(doc: Json): QuestProjection {
 	};
 }
 
-export interface BuildRow {
+export interface ShareRow {
 	key: string;
-	build: string;
+	label: string;
+	value: number;
+	share: number;
+}
+
+export interface CombatTotals {
 	hits: number;
 	misses: number;
 	crits: number;
@@ -210,72 +215,152 @@ export interface BuildRow {
 	damage: number;
 	accuracy: number | null;
 	dps: number | null;
+	crit_rate: number | null;
+	kill_death: number | null;
+}
+
+export interface BuildRow extends CombatTotals {
+	key: string;
+	build: string;
+	sources: ShareRow[];
+	stances: ShareRow[];
+	invocations: ShareRow[];
 }
 
 export interface AlltimeProjection {
 	usable: boolean;
 	builds: BuildRow[];
-	sources: { key: string; source: string; damage: number; share: number }[];
+	sources: ShareRow[];
+	stances: ShareRow[];
+	invocations: ShareRow[];
+	totals: CombatTotals;
 }
 
-function buildRow(key: string, build: string, raw: Record<string, Json>): BuildRow {
-	const hits = num(raw.hits) ?? 0;
-	const misses = num(raw.misses) ?? 0;
-	const combat = num(raw.combat_secs) ?? 0;
-	const sourceDmg = isRecord(raw.source_dmg) ? raw.source_dmg : {};
-	const damage = sum(Object.values(sourceDmg).map((value) => num(value) ?? 0));
-	const swings = hits + misses;
+// The meter writes classes as WAR-CLR because a slash cannot go in a filename.
+export const buildLabel = (key: string): string => key.split('-').join(' / ');
+
+const numbers = (raw: Json): Record<string, number> => {
+	if (!isRecord(raw)) return {};
+	const out: Record<string, number> = {};
+	for (const [key, value] of Object.entries(raw)) {
+		const parsed = num(value);
+		if (parsed !== null && parsed > 0) out[key] = parsed;
+	}
+	return out;
+};
+
+function shares(prefix: string, map: Record<string, number>): ShareRow[] {
+	const total = sum(Object.values(map));
+	return Object.entries(map)
+		.map(([label, value]) => ({
+			key: `${prefix}:${label}`,
+			label,
+			value,
+			share: total > 0 ? value / total : 0
+		}))
+		.sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+}
+
+function merge(maps: Record<string, number>[]): Record<string, number> {
+	const out: Record<string, number> = {};
+	for (const map of maps) {
+		for (const [key, value] of Object.entries(map)) out[key] = (out[key] ?? 0) + value;
+	}
+	return out;
+}
+
+function totalsOf(
+	counts: Omit<CombatTotals, 'accuracy' | 'dps' | 'crit_rate' | 'kill_death'>
+): CombatTotals {
+	const swings = counts.hits + counts.misses;
 	return {
-		key,
-		build,
-		hits,
-		misses,
-		crits: num(raw.crits) ?? 0,
-		kills: num(raw.kills) ?? 0,
-		deaths: num(raw.deaths) ?? 0,
-		biggest: num(raw.biggest) ?? 0,
-		combat_secs: combat,
-		damage,
-		accuracy: swings > 0 ? hits / swings : null,
-		dps: combat > 0 && damage > 0 ? damage / combat : null
+		...counts,
+		accuracy: swings > 0 ? counts.hits / swings : null,
+		dps: counts.combat_secs > 0 && counts.damage > 0 ? counts.damage / counts.combat_secs : null,
+		crit_rate: counts.hits > 0 ? counts.crits / counts.hits : null,
+		kill_death: counts.deaths > 0 ? counts.kills / counts.deaths : null
 	};
 }
 
+function buildRow(key: string, build: string, raw: Record<string, Json>): BuildRow {
+	const sourceDmg = numbers(raw.source_dmg);
+	return {
+		...totalsOf({
+			hits: num(raw.hits) ?? 0,
+			misses: num(raw.misses) ?? 0,
+			crits: num(raw.crits) ?? 0,
+			kills: num(raw.kills) ?? 0,
+			deaths: num(raw.deaths) ?? 0,
+			biggest: num(raw.biggest) ?? 0,
+			combat_secs: num(raw.combat_secs) ?? 0,
+			damage: sum(Object.values(sourceDmg))
+		}),
+		key,
+		build,
+		sources: shares(`${key}:src`, sourceDmg),
+		stances: shares(`${key}:stance`, numbers(raw.stance_secs)),
+		invocations: shares(`${key}:inv`, numbers(raw.invocation_secs))
+	};
+}
+
+const ALLTIME_KEYS = ['hits', 'misses', 'crits', 'kills', 'deaths', 'biggest', 'source_dmg'];
+
 export function projectAlltime(doc: Json): AlltimeProjection {
-	const empty: AlltimeProjection = { usable: false, builds: [], sources: [] };
+	const zero = totalsOf({
+		hits: 0,
+		misses: 0,
+		crits: 0,
+		kills: 0,
+		deaths: 0,
+		biggest: 0,
+		combat_secs: 0,
+		damage: 0
+	});
+	const empty: AlltimeProjection = {
+		usable: false,
+		builds: [],
+		sources: [],
+		stances: [],
+		invocations: [],
+		totals: zero
+	};
 	if (!isRecord(doc)) return empty;
 
 	const builds: BuildRow[] = [];
 	if (isRecord(doc.builds)) {
 		for (const [key, raw] of Object.entries(doc.builds)) {
-			if (isRecord(raw)) builds.push(buildRow(key, key, raw));
+			if (isRecord(raw)) builds.push(buildRow(key, buildLabel(key), raw));
 		}
-	} else if ('hits' in doc || 'kills' in doc || 'source_dmg' in doc) {
-		builds.push(buildRow('current', str(doc.build) ?? 'Current build', doc));
+	} else if (ALLTIME_KEYS.some((key) => key in doc)) {
+		const key = str(doc.build);
+		builds.push(buildRow('current', key ? buildLabel(key) : 'Current build', doc));
 	}
 	if (!builds.length) return empty;
 
 	builds.sort((a, b) => b.damage - a.damage || a.build.localeCompare(b.build));
 
-	const totals = new Map<string, number>();
-	const withSources = isRecord(doc.builds) ? Object.values(doc.builds) : [doc];
-	for (const raw of withSources) {
-		if (!isRecord(raw) || !isRecord(raw.source_dmg)) continue;
-		for (const [source, value] of Object.entries(raw.source_dmg)) {
-			totals.set(source, (totals.get(source) ?? 0) + (num(value) ?? 0));
-		}
-	}
-	const grand = sum([...totals.values()]);
-	const sources = [...totals.entries()]
-		.map(([source, damage]) => ({
-			key: source,
-			source,
-			damage,
-			share: grand > 0 ? damage / grand : 0
-		}))
-		.sort((a, b) => b.damage - a.damage);
+	const totals = totalsOf({
+		hits: sum(builds.map((row) => row.hits)),
+		misses: sum(builds.map((row) => row.misses)),
+		crits: sum(builds.map((row) => row.crits)),
+		kills: sum(builds.map((row) => row.kills)),
+		deaths: sum(builds.map((row) => row.deaths)),
+		biggest: Math.max(...builds.map((row) => row.biggest)),
+		combat_secs: sum(builds.map((row) => row.combat_secs)),
+		damage: sum(builds.map((row) => row.damage))
+	});
 
-	return { usable: true, builds, sources };
+	const raws = isRecord(doc.builds) ? Object.values(doc.builds) : [doc];
+	const pick = (field: string) => merge(raws.map((raw) => numbers(isRecord(raw) ? raw[field] : null)));
+
+	return {
+		usable: true,
+		builds,
+		sources: shares('src', pick('source_dmg')),
+		stances: shares('stance', pick('stance_secs')),
+		invocations: shares('inv', pick('invocation_secs')),
+		totals
+	};
 }
 
 export const rawJson = (doc: HarvestDoc | undefined) =>

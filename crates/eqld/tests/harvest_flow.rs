@@ -168,14 +168,75 @@ async fn ships_every_kind_once_with_the_bearer_token() {
     assert_eq!(quest["doc"]["current"], "1042");
     assert_eq!(quest["doc"]["quests"]["1042"]["have"]["13073"], 4);
     let alltime = by_kind("alltime");
-    assert_eq!(alltime["doc"]["kills"], 1349);
-    assert_eq!(alltime["doc"]["source_dmg"]["melee"], 4120334);
+    assert_eq!(alltime["doc"]["builds"]["WAR-CLR"]["kills"], 1349);
+    assert_eq!(
+        alltime["doc"]["builds"]["WAR-CLR"]["source_dmg"]["melee"],
+        4120334
+    );
 
     let state = eqld::State::load(&game.path().join("state.json")).unwrap();
     assert_eq!(state.harvest.len(), 3);
     let atlas_state = &state.harvest[ATLAS];
     assert_eq!(atlas_state.last_status, LastStatus::Uploaded);
     assert_eq!(atlas_state.uploaded_hash.as_ref(), Some(&atlas_state.hash));
+}
+
+/// The server keeps one harvest doc per (character, kind), so two builds have
+/// to arrive as one document or they overwrite each other every tick.
+#[tokio::test]
+async fn a_characters_builds_arrive_as_one_document() {
+    let recorder = Recorder::new(201);
+    let addr = spawn_server(recorder.clone()).await;
+    let game = tempfile::tempdir().unwrap();
+    let harvest = tempfile::tempdir().unwrap();
+    plant(&harvest, ALLTIME);
+    let mut second: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixtures().join(ALLTIME)).unwrap()).unwrap();
+    second["kills"] = Value::from(7);
+    second["source_dmg"] = serde_json::json!({ "spell": 42 });
+    std::fs::write(
+        harvest
+            .path()
+            .join("eql_alltime_Dorsk_erudin__WAR-SHM.json"),
+        serde_json::to_string(&second).unwrap(),
+    )
+    .unwrap();
+    let mut daemon = harness(&game, Some(&harvest), addr);
+
+    assert_eq!(daemon.tick().await.harvested, 1, "one upload for two files");
+    assert_eq!(recorder.count(), 1);
+    let doc = recorder.requests().pop().unwrap().body["doc"].clone();
+    assert_eq!(doc["builds"]["WAR-CLR"]["kills"], 1349);
+    assert_eq!(doc["builds"]["WAR-SHM"]["kills"], 7);
+    assert_eq!(doc["builds"]["WAR-SHM"]["source_dmg"]["spell"], 42);
+    assert_eq!(doc.as_object().unwrap().len(), 1, "nothing beside builds");
+
+    assert_eq!(daemon.tick().await.harvested, 0, "and only once");
+
+    let state = eqld::State::load(&game.path().join("state.json")).unwrap();
+    assert_eq!(
+        state.harvest.keys().collect::<Vec<_>>(),
+        ["alltime:Dorsk_erudin"]
+    );
+}
+
+#[tokio::test]
+async fn a_reader_that_never_saw_a_class_ships_the_file_untouched() {
+    let recorder = Recorder::new(201);
+    let addr = spawn_server(recorder.clone()).await;
+    let game = tempfile::tempdir().unwrap();
+    let harvest = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixtures().join(ALLTIME),
+        harvest.path().join("eql_alltime_Dorsk_erudin.json"),
+    )
+    .unwrap();
+    let mut daemon = harness(&game, Some(&harvest), addr);
+
+    assert_eq!(daemon.tick().await.harvested, 1);
+    let doc = recorder.requests().pop().unwrap().body["doc"].clone();
+    assert_eq!(doc["kills"], 1349, "flat, exactly as the reader wrote it");
+    assert!(doc["builds"].is_null());
 }
 
 #[tokio::test]
