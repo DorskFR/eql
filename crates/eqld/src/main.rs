@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     }
 
-    let mut daemon = Daemon::new(config)?;
+    let mut daemon = Daemon::new(config)?.watching(path.clone());
 
     let harvest = daemon
         .config()
@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         harvest = %harvest,
         overlays = ?daemon.overlays(),
         hidden = ?daemon.hidden_overlays(),
+        config = %path.display(),
         "eqld starting"
     );
 
