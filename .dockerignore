@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+target
+fixtures
+equi
+.qa
+tmp
+node_modules
+*.md
+Dockerfile
+.dockerignore
+.env
