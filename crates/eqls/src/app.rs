@@ -482,6 +482,17 @@ struct InventoryEntryView {
     entry: InventoryEntry,
     #[serde(skip_serializing_if = "Option::is_none")]
     item: Option<ItemRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upgrade: Option<u32>,
+}
+
+/// The server decorates names ("Bronze Helm +5"); the wiki knows only base names.
+fn upgrade_suffix(name: &str) -> Option<(&str, u32)> {
+    let (base, level) = name.rsplit_once(" +")?;
+    if base.is_empty() || level.is_empty() || !level.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((base, level.parse().ok()?))
 }
 
 #[derive(Clone, Serialize)]
@@ -558,6 +569,47 @@ async fn latest_snapshot(pool: &PgPool, server: &str, name: &str) -> Result<Snap
     })
 }
 
+fn peel_decoration(name: &str) -> Option<(String, Option<u32>)> {
+    if let Some((base, level)) = upgrade_suffix(name) {
+        return Some((base.to_string(), Some(level)));
+    }
+    if let Some(base) = name.strip_suffix('*') {
+        let base = base.trim_end();
+        if !base.is_empty() {
+            return Some((base.to_string(), None));
+        }
+    }
+    if name.ends_with(')') {
+        if let Some((base, _)) = name.rsplit_once(" (") {
+            if !base.is_empty() {
+                return Some((base.to_string(), None));
+            }
+        }
+    }
+    None
+}
+
+fn name_candidates(name: &str) -> Vec<(String, Option<u32>)> {
+    let mut candidates = vec![(name.to_lowercase(), None)];
+    while let Some((base, level)) = peel_decoration(&candidates.last().unwrap().0) {
+        let level = level.or(candidates.last().unwrap().1);
+        candidates.push((base, level));
+    }
+    candidates
+}
+
+fn resolve_item(
+    items: &HashMap<String, ItemRecord>,
+    name: &str,
+) -> (Option<ItemRecord>, Option<u32>) {
+    for (candidate, level) in name_candidates(name) {
+        if let Some(item) = items.get(&candidate) {
+            return (Some(item.clone()), level);
+        }
+    }
+    (None, None)
+}
+
 async fn join_items(
     pool: &PgPool,
     entries: Vec<InventoryEntry>,
@@ -565,7 +617,11 @@ async fn join_items(
     let mut names: Vec<String> = entries
         .iter()
         .filter(|entry| !entry.is_empty_slot())
-        .map(|entry| entry.name.to_lowercase())
+        .flat_map(|entry| {
+            name_candidates(&entry.name)
+                .into_iter()
+                .map(|(candidate, _)| candidate)
+        })
         .collect();
     names.sort_unstable();
     names.dedup();
@@ -573,9 +629,13 @@ async fn join_items(
 
     Ok(entries
         .into_iter()
-        .map(|entry| InventoryEntryView {
-            item: items.get(&entry.name.to_lowercase()).cloned(),
-            entry,
+        .map(|entry| {
+            let (item, upgrade) = resolve_item(&items, &entry.name);
+            InventoryEntryView {
+                item,
+                upgrade,
+                entry,
+            }
         })
         .collect())
 }
@@ -1511,6 +1571,170 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn upgrade_suffix_strips_only_trailing_plus_digits() {
+        assert_eq!(upgrade_suffix("Bronze Helm +5"), Some(("Bronze Helm", 5)));
+        assert_eq!(
+            upgrade_suffix("Drop of Crystallized Flame +12"),
+            Some(("Drop of Crystallized Flame", 12))
+        );
+        assert_eq!(upgrade_suffix("Bronze Helm"), None);
+        assert_eq!(upgrade_suffix("Bronze Helm +"), None);
+        assert_eq!(upgrade_suffix("Bronze Helm +5a"), None);
+        assert_eq!(upgrade_suffix("Bronze Helm+5"), None);
+        assert_eq!(upgrade_suffix(" +5"), None);
+    }
+
+    #[test]
+    fn name_candidates_peel_decorations_until_the_base_name() {
+        let folded = |name: &str| -> Vec<(String, Option<u32>)> { name_candidates(name) };
+        assert_eq!(
+            folded("Backpack*"),
+            vec![("backpack*".into(), None), ("backpack".into(), None)]
+        );
+        assert_eq!(
+            folded("Savant's Cap (Exaltation)"),
+            vec![
+                ("savant's cap (exaltation)".into(), None),
+                ("savant's cap".into(), None)
+            ]
+        );
+        assert_eq!(
+            folded("Gossamer Cap (Exaltation) +2"),
+            vec![
+                ("gossamer cap (exaltation) +2".into(), None),
+                ("gossamer cap (exaltation)".into(), Some(2)),
+                ("gossamer cap".into(), Some(2)),
+            ],
+            "the upgrade level survives further peeling"
+        );
+        assert_eq!(folded("Bone Chips"), vec![("bone chips".into(), None)]);
+        assert_eq!(folded("*"), vec![("*".into(), None)]);
+    }
+
+    #[test]
+    fn resolve_item_matches_starred_and_parenthesised_names() {
+        let mut items = HashMap::new();
+        items.insert("backpack".to_string(), item_named(1, "Backpack"));
+        items.insert("savant's cap".to_string(), item_named(2, "Savant's Cap"));
+
+        let (item, upgrade) = resolve_item(&items, "Backpack*");
+        assert_eq!(item.unwrap().id, 1);
+        assert_eq!(upgrade, None);
+
+        let (item, upgrade) = resolve_item(&items, "Savant's Cap (Exaltation) +3");
+        assert_eq!(item.unwrap().id, 2);
+        assert_eq!(upgrade, Some(3));
+    }
+
+    fn item_named(id: i64, name: &str) -> ItemRecord {
+        ItemRecord {
+            id,
+            game_id: None,
+            name: name.to_string(),
+            stats: serde_json::json!({}),
+            scraped_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn resolve_item_prefers_exact_then_falls_back_to_base_name() {
+        let mut items = HashMap::new();
+        items.insert("bronze helm".to_string(), item_named(1, "Bronze Helm"));
+        items.insert(
+            "bronze helm +5".to_string(),
+            item_named(2, "Bronze Helm +5"),
+        );
+
+        let (item, upgrade) = resolve_item(&items, "Bronze Helm +5");
+        assert_eq!(item.unwrap().id, 2, "exact match wins");
+        assert_eq!(upgrade, None);
+
+        let (item, upgrade) = resolve_item(&items, "Bronze Helm +3");
+        assert_eq!(item.unwrap().id, 1, "falls back to the base item");
+        assert_eq!(upgrade, Some(3));
+
+        let (item, upgrade) = resolve_item(&items, "Cloth Cap +2");
+        assert!(item.is_none());
+        assert_eq!(upgrade, None);
+    }
+
+    #[tokio::test]
+    async fn upgraded_items_resolve_to_base_stats_in_inventory_and_stats() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+        let stats_json = |name: &str, ac, hp, mana| {
+            serde_json::to_value(ItemStats {
+                name: name.to_string(),
+                ac: Some(ac),
+                hp: Some(hp),
+                mana: Some(mana),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        for (name, ac, hp, mana) in [("Bronze Helm", 14, 20, 10), ("Mithril Earring", 2, 15, 15)] {
+            sqlx::query(
+                "insert into items (name, stats, wikitext) values ($1, $2, '') \
+                 on conflict (name) do update set stats = excluded.stats",
+            )
+            .bind(name)
+            .bind(SqlJson(stats_json(name, ac, hp, mana)))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let upload = r#"{"character":"Dorsk","server":"erudin","entries":[
+            {"location":"Head","name":"Bronze Helm +5","id":4201,"count":1,"slots":10},
+            {"location":"Ear","name":"Mithril Earring +2","id":10041,"count":1,"slots":10},
+            {"location":"Ear","name":"Unknown Bauble +1","id":9,"count":1,"slots":10},
+            {"location":"Neck","name":"Empty","id":0,"count":0,"slots":0}]}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/inventory")
+            .header("authorization", "Bearer s3cret")
+            .header("content-type", "application/json")
+            .body(Body::from(upload))
+            .unwrap();
+        let (status, _) = json_of(&app, request).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, inventory) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Dorsk/inventory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = inventory["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["name"], "Bronze Helm +5", "display name kept");
+        assert_eq!(entries[0]["item"]["name"], "Bronze Helm");
+        assert_eq!(entries[0]["upgrade"], 5);
+        assert_eq!(entries[1]["item"]["name"], "Mithril Earring");
+        assert_eq!(entries[1]["upgrade"], 2);
+        assert!(entries[2]["item"].is_null());
+        assert!(entries[2]["upgrade"].is_null());
+
+        let (status, stats) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Dorsk/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["stats"]["ac"], 16);
+        assert_eq!(stats["stats"]["hp"], 35);
+        assert_eq!(stats["stats"]["mana"], 25);
+        assert_eq!(stats["stats"]["known_items"], 2);
+        assert_eq!(stats["stats"]["unknown_items"], 1);
     }
 
     #[test]

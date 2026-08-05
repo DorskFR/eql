@@ -71,6 +71,7 @@ export interface InventoryEntry {
 	count: number;
 	slots: number;
 	item?: ItemRecord;
+	upgrade?: number;
 }
 
 export interface CharacterSummary {

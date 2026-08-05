@@ -21,7 +21,7 @@
 		type Column,
 		type TabItem
 	} from '@dorsk/tsumikit';
-	import type { InventoryEntry, ItemClasses, LogEvent, WeaponSummary } from '$lib/api';
+	import type { InventoryEntry, ItemClasses, ItemStats, LogEvent, WeaponSummary } from '$lib/api';
 	import {
 		type BuildRow,
 		coin,
@@ -36,7 +36,7 @@
 		type ZoneRow
 	} from '$lib/harvest';
 	import { describeEvent, eventTone } from '$lib/events';
-	import { filled, groupEntries } from '$lib/inventory';
+	import { bags, filled, groupEntries, paperdoll } from '$lib/inventory';
 	import {
 		ATTRIBUTES,
 		damageDelay,
@@ -69,6 +69,12 @@
 	);
 
 	const eventRows = $derived(events.data?.pages.flat() ?? []);
+	const level = $derived(
+		eventRows.reduce(
+			(max, event) => (event.kind === 'level' ? Math.max(max, event.payload.level ?? 0) : max),
+			0
+		)
+	);
 
 	const atlasDoc = useHarvest(
 		() => server,
@@ -180,11 +186,6 @@
 
 	const signed = (value: number) => (value > 0 ? `+${value}` : String(value));
 
-	const statColumns: Column<StatRow>[] = [
-		{ key: 'label', label: 'Stat' },
-		{ key: 'value', label: 'From gear', align: 'right', get: (row) => signed(row.value) }
-	];
-
 	const classColumns: Column<ItemClasses>[] = [
 		{ key: 'location', label: 'Slot', sortable: true },
 		{ key: 'name', label: 'Item', sortable: true },
@@ -205,37 +206,32 @@
 	const general = $derived(filled(groups.general));
 	const bank = $derived(filled(groups.bank));
 	const totals = $derived(equippedTotals(groups.equipped));
+	const slotRows = $derived(paperdoll(groups.equipped));
+	const generalBags = $derived(bags(keyedEntries.filter((e) => e.location.startsWith('General'))));
+	const bankBags = $derived(
+		bags(keyedEntries.filter((e) => e.location.startsWith('Bank') || e.location.startsWith('SharedBank')))
+	);
 
-	const num = (value: number | null | undefined) => (value ? String(value) : '');
+	const shortName = (value: string) => value.replace(/ \+\d+$/, '');
 
-	const equippedColumns: Column<InventoryEntry>[] = [
-		{ key: 'location', label: 'Slot', sortable: true },
-		{ key: 'name', label: 'Item', sortable: true },
-		{ key: 'ac', label: 'AC', align: 'right', sortable: true, get: (e) => num(e.item?.stats.ac) },
-		{ key: 'hp', label: 'HP', align: 'right', sortable: true, get: (e) => num(e.item?.stats.hp) },
-		{
-			key: 'mana',
-			label: 'Mana',
-			align: 'right',
-			sortable: true,
-			get: (e) => num(e.item?.stats.mana)
-		},
-		{ key: 'dmgdelay', label: 'Dmg/Delay', align: 'right', get: (e) => damageDelay(e.item?.stats) },
-		{
-			key: 'weight',
-			label: 'Weight',
-			align: 'right',
-			sortable: true,
-			get: (e) => num(e.item?.stats.weight)
-		}
-	];
-
-	const columns: Column<InventoryEntry>[] = [
-		{ key: 'location', label: 'Location', sortable: true },
-		{ key: 'name', label: 'Item', sortable: true },
-		{ key: 'count', label: 'Count', align: 'right', sortable: true },
-		{ key: 'id', label: 'Item ID', align: 'right', sortable: true }
-	];
+	function tooltipLines(entry: InventoryEntry): string[] {
+		const s = entry.item?.stats;
+		if (!s) return [];
+		const lines: string[] = [];
+		const pair = (label: string, value: number | null | undefined) => {
+			if (value) lines.push(`${label} ${signed(value)}`);
+		};
+		if (s.damage || s.delay) lines.push(`DMG ${s.damage ?? '?'} / DLY ${s.delay ?? '?'}`);
+		pair('AC', s.ac);
+		pair('HP', s.hp);
+		pair('MANA', s.mana);
+		for (const [key, label] of ATTRIBUTES) pair(label, s[key as keyof ItemStats] as number | null);
+		for (const [key, label] of RESISTS)
+			pair(`SV ${label.toUpperCase()}`, s[key as keyof ItemStats] as number | null);
+		if (s.weight) lines.push(`WT ${s.weight}`);
+		if (s.classes.length) lines.push(s.classes.join(' '));
+		return lines;
+	}
 
 	const rowKey = (entry: InventoryEntry & { key: string }) => entry.key;
 
@@ -248,10 +244,10 @@
 		{ id: 'quests', label: 'Quests', icon: 'bookmark' }
 	]);
 
-	let tab = $state('stats');
+	let tab = $state('general');
 </script>
 
-<Stack gap="var(--sp-4)">
+<div class="eq">
 	<Cluster justify="space-between">
 		<Cluster gap="var(--sp-3)">
 			<Button href="/" variant="ghost" size="sm">Back</Button>
@@ -282,77 +278,157 @@
 			onAction={() => inventory.refetch()}
 		/>
 	{:else}
-		<Stack gap="var(--sp-2)">
-			<Cluster justify="space-between">
-				<Heading level={3}>Equipped</Heading>
-				<Text variant="caption" tone="faint">
-					{totals.known} of {totals.known + totals.unknown} items in the item database
-				</Text>
-			</Cluster>
+		<div class="eq-window">
+			<div class="eq-sheet">
+				<aside class="eq-col">
+					<div class="eq-panel eq-identity">
+						<div class="eq-name">{name}</div>
+						<div class="eq-sub">
+							{#if level}Level {level} <span class="eq-faint">(from logs)</span> ·{/if}
+							{server}
+						</div>
+					</div>
 
-			<Cluster gap="var(--sp-3)">
-				<Metric label="Equipped AC" value={totals.ac} icon="lock" tone="info" />
-				<Metric label="Equipped HP" value={totals.hp} icon="heart" tone="ok" />
-				<Metric label="Equipped Mana" value={totals.mana} icon="star" tone="info" />
-				<Metric label="Equipped Weight" value={totals.weight} icon="archive" />
-			</Cluster>
+					<div class="eq-panel">
+						<div class="eq-panel-title">Vitals · from gear</div>
+						<div class="eq-vitals">
+							<div class="eq-row"><span>HP</span><b class="eq-green">+{stats?.hp ?? totals.hp}</b></div>
+							<div class="eq-row"><span>Mana</span><b class="eq-blue">+{stats?.mana ?? totals.mana}</b></div>
+							<div class="eq-row"><span>End</span><b class="eq-tan">+{stats?.endurance ?? 0}</b></div>
+							<div class="eq-row"><span>AC</span><b class="eq-green">+{stats?.ac ?? totals.ac}</b></div>
+							{#if stats?.haste}
+								<div class="eq-row"><span>Haste</span><b class="eq-green">{stats.haste}%</b></div>
+							{/if}
+						</div>
+					</div>
 
-			<Card padding="none">
-				<DataTable
-					columns={equippedColumns}
-					rows={groups.equipped}
-					{rowKey}
-					cellSnippets={{ name: itemName }}
-					empty="No equipped slots in this snapshot."
-					stickyHeader
-				/>
-			</Card>
-		</Stack>
+					<div class="eq-panel">
+						<div class="eq-panel-title">Attributes · from gear</div>
+						<div class="eq-vitals">
+							{#each attributes as attr (attr.label)}
+								<div class="eq-row">
+									<span>{attr.label}</span>
+									<b class={attr.value > 0 ? 'eq-green' : 'eq-dim'}>{signed(attr.value)}</b>
+								</div>
+							{/each}
+						</div>
+					</div>
 
-		<Tabs {tabs} bind:value={tab} label="Inventory containers">
-			{#snippet panel(id)}
-				{#if id === 'stats'}
-					{@render statsPanel()}
-				{:else if id === 'events'}
-					{@render eventsPanel()}
-				{:else if id === 'atlas'}
-					{@render atlasPanel()}
-				{:else if id === 'quests'}
-					{@render questsPanel()}
-				{:else}
-					<Card padding="none">
-						{#if id === 'general'}
-							<DataTable
-								{columns}
-								rows={general}
-								{rowKey}
-								cellSnippets={{ name: itemName }}
-								empty="General inventory is empty."
-								stickyHeader
-							/>
+					<div class="eq-panel">
+						<div class="eq-panel-title">Resists · from gear</div>
+						<div class="eq-vitals">
+							{#each resists as resist (resist.label)}
+								<div class="eq-row">
+									<span>SV {resist.label.toUpperCase()}</span>
+									<b class={resist.value > 0 ? 'eq-green' : 'eq-dim'}>{signed(resist.value)}</b>
+								</div>
+							{/each}
+						</div>
+					</div>
+				</aside>
+
+				<section class="eq-col eq-main">
+					<div class="eq-panel">
+						<div class="eq-panel-title">
+							Equipment
+							<span class="eq-faint">{totals.known} of {totals.known + totals.unknown} items known</span>
+						</div>
+						<div class="eq-grid">
+							{#each slotRows as row, rowIndex (rowIndex)}
+								<div class="eq-grid-row">
+									{#each row as slot (slot.key)}
+										{@render slotCell(slot.label, slot.entry)}
+									{/each}
+								</div>
+							{/each}
+						</div>
+						<div class="eq-weight">
+							<span>EQUIPPED WEIGHT</span>
+							<b class="eq-red">{totals.weight}</b>
+						</div>
+					</div>
+				</section>
+			</div>
+
+			<Tabs {tabs} bind:value={tab} label="Inventory containers">
+				{#snippet panel(id)}
+					<div class="eq-tabpanel">
+						{#if id === 'stats'}
+							{@render statsPanel()}
+						{:else if id === 'events'}
+							{@render eventsPanel()}
+						{:else if id === 'atlas'}
+							{@render atlasPanel()}
+						{:else if id === 'quests'}
+							{@render questsPanel()}
+						{:else if id === 'general'}
+							{@render bagPanel(generalBags, 'General inventory is empty.')}
 						{:else}
-							<DataTable
-								{columns}
-								rows={bank}
-								{rowKey}
-								cellSnippets={{ name: itemName }}
-								empty="Bank is empty."
-								stickyHeader
-							/>
+							{@render bagPanel(bankBags, 'Bank is empty.')}
 						{/if}
-					</Card>
-				{/if}
-			{/snippet}
-		</Tabs>
+					</div>
+				{/snippet}
+			</Tabs>
+		</div>
 	{/if}
-</Stack>
+</div>
+
+{#snippet slotCell(label: string, entry: (InventoryEntry & { key: string }) | null)}
+	{#if entry}
+		<a class="eq-slot eq-filled" href={entry.item ? itemPath(entry.item.name) : itemPath(entry.name)}>
+			<span class="eq-slot-name">{shortName(entry.name)}</span>
+			{#if entry.upgrade}
+				<span class="eq-upgrade">+{entry.upgrade}</span>
+			{/if}
+			<span class="eq-tooltip">
+				<b>{entry.name}</b>
+				{#each tooltipLines(entry) as line (line)}
+					<span>{line}</span>
+				{:else}
+					<span class="eq-faint">not in the item database</span>
+				{/each}
+			</span>
+		</a>
+	{:else}
+		<div class="eq-slot"><span class="eq-slot-label">{label.toUpperCase()}</span></div>
+	{/if}
+{/snippet}
+
+{#snippet bagPanel(list: ReturnType<typeof bags<InventoryEntry & { key: string }>>, empty: string)}
+	{#if list.length === 0}
+		<div class="eq-panel eq-empty">{empty}</div>
+	{:else}
+		<div class="eq-bags">
+			{#each list as bag (bag.key)}
+				<div class="eq-panel eq-bag">
+					<div class="eq-panel-title">
+						{bag.label}
+						{#if bag.container}
+							· <a class="eq-baglink" href={itemPath(bag.container.item?.name ?? bag.container.name)}
+								>{bag.container.name}</a>
+						{/if}
+					</div>
+					{#if bag.contents.length}
+						<div class="eq-bag-grid">
+							{#each bag.contents as entry (entry.key)}
+								{@render slotCell('', entry)}
+							{/each}
+						</div>
+					{:else if bag.container}
+						<div class="eq-faint">{bag.container.slots ? 'empty bag' : 'not a container'}</div>
+					{/if}
+				</div>
+			{/each}
+		</div>
+	{/if}
+{/snippet}
 
 {#snippet weaponCard(label: string, weapon: WeaponSummary | null)}
 	<Stack gap="var(--sp-1)">
 		<Cluster gap="var(--sp-2)">
 			<Text variant="caption" tone="muted">{label}</Text>
 			{#if weapon}
-				<Link href={itemPath(weapon.name)}>{weapon.name}</Link>
+				<Link href={itemPath(shortName(weapon.name))}>{weapon.name}</Link>
 				{#if weapon.item_type}
 					<Badge size="sm" tone="info">{weapon.item_type}</Badge>
 				{/if}
@@ -403,27 +479,6 @@
 			</AutoGrid>
 
 			<AutoGrid min="18rem">
-				<Card padding="none">
-					<DataTable
-						columns={statColumns}
-						rows={attributes}
-						rowKey={(row) => row.label}
-						empty="No attributes from gear."
-					/>
-				</Card>
-				<Card>
-					<Stack gap="var(--sp-2)">
-						<Heading level={3} size="sm">Resists</Heading>
-						<Cluster gap="var(--sp-2)">
-							{#each resists as resist (resist.label)}
-								<Badge tone={resist.value > 0 ? 'info' : 'neutral'} mono>
-									{resist.label}
-									{signed(resist.value)}
-								</Badge>
-							{/each}
-						</Cluster>
-					</Stack>
-				</Card>
 				<Card>
 					<Stack gap="var(--sp-3)">
 						<Heading level={3} size="sm">Weapons</Heading>
@@ -431,33 +486,32 @@
 						{@render weaponCard('Secondary', stats.secondary)}
 					</Stack>
 				</Card>
-			</AutoGrid>
-
-			<Card>
-				<Stack gap="var(--sp-2)">
-					<Cluster justify="space-between">
-						<Heading level={3} size="sm">Usable by</Heading>
-						<Badge tone={stats.min_classes_needed === null ? 'danger' : 'neutral'}>
-							{coverLabel(stats.min_classes_needed)}
-						</Badge>
-					</Cluster>
-					{#if stats.usable_by.length}
-						<Cluster gap="var(--sp-2)">
-							{#each stats.usable_by as klass (klass)}
-								<Badge tone="ok" size="sm">{klass}</Badge>
-							{/each}
+				<Card>
+					<Stack gap="var(--sp-2)">
+						<Cluster justify="space-between">
+							<Heading level={3} size="sm">Usable by</Heading>
+							<Badge tone={stats.min_classes_needed === null ? 'danger' : 'neutral'}>
+								{coverLabel(stats.min_classes_needed)}
+							</Badge>
 						</Cluster>
-					{:else}
-						<Text tone="muted" variant="caption">
-							No single class can wear every equipped item — normal for a three-class loadout.
-						</Text>
-					{/if}
-				</Stack>
-			</Card>
+						{#if stats.usable_by.length}
+							<Cluster gap="var(--sp-2)">
+								{#each stats.usable_by as klass (klass)}
+									<Badge tone="ok" size="sm">{klass}</Badge>
+								{/each}
+							</Cluster>
+						{:else}
+							<Text tone="muted" variant="caption">
+								No single class can wear every equipped item — normal for a three-class loadout.
+							</Text>
+						{/if}
+					</Stack>
+				</Card>
+			</AutoGrid>
 
 			{@render alltimeCard()}
 
-		{#if restricted.length}
+			{#if restricted.length}
 				<Card padding="none">
 					<DataTable
 						columns={classColumns}
@@ -530,21 +584,6 @@
 
 {#snippet eventKind(event: LogEvent)}
 	<Badge tone={eventTone(event)} size="sm">{event.kind}</Badge>
-{/snippet}
-
-{#snippet itemName(entry: InventoryEntry)}
-	{#if entry.item}
-		<Cluster gap="var(--sp-2)">
-			<Link href={itemPath(entry.item.name)}>{entry.name}</Link>
-			{#if entry.item.stats.effects.length}
-				<Badge tone="info" size="sm">{entry.item.stats.effects[0].kind}</Badge>
-			{/if}
-		</Cluster>
-	{:else if entry.name === 'Empty'}
-		<Text tone="faint">Empty</Text>
-	{:else}
-		<Text>{entry.name}</Text>
-	{/if}
 {/snippet}
 
 {#snippet harvestState(
@@ -727,3 +766,276 @@
 		</Stack>
 	{/if}
 {/snippet}
+
+<style>
+	.eq {
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-4, 1rem);
+	}
+
+	.eq-window {
+		--eq-gold: #b executable69454;
+		border-radius: 4px;
+	}
+
+	.eq-window {
+		--eq-gold: #96825a;
+		--eq-gold-bright: #c9b37a;
+		--eq-text: #d8cfae;
+		--eq-green: #4ade4a;
+		--eq-blue: #7db4f0;
+		--eq-red: #e05252;
+		--eq-panel: #1a1a1d;
+		color: var(--eq-text);
+		font-family: Georgia, 'Times New Roman', serif;
+		background:
+			radial-gradient(ellipse 80% 50% at 20% 10%, rgba(90, 90, 100, 0.25), transparent 60%),
+			radial-gradient(ellipse 60% 40% at 80% 80%, rgba(70, 70, 85, 0.2), transparent 60%),
+			radial-gradient(ellipse 40% 30% at 60% 30%, rgba(110, 110, 120, 0.12), transparent 70%),
+			repeating-linear-gradient(
+				115deg,
+				#232326 0px,
+				#1c1c1f 3px,
+				#232327 7px,
+				#18181b 11px,
+				#212124 16px
+			);
+		border: 2px solid #3a3a3e;
+		border-top-color: #55555a;
+		border-left-color: #4a4a4f;
+		outline: 1px solid #0c0c0e;
+		box-shadow:
+			inset 0 0 0 1px #0c0c0e,
+			0 4px 18px rgba(0, 0, 0, 0.6);
+		padding: var(--sp-3, 0.75rem);
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-3, 0.75rem);
+	}
+
+	.eq-sheet {
+		display: grid;
+		grid-template-columns: minmax(13rem, 16rem) 1fr;
+		gap: var(--sp-3, 0.75rem);
+		align-items: start;
+	}
+
+	@media (max-width: 44rem) {
+		.eq-sheet {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	.eq-col {
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-3, 0.75rem);
+		min-width: 0;
+	}
+
+	.eq-panel {
+		background: linear-gradient(160deg, #1d1d20, #151517 70%);
+		border: 1px solid #060607;
+		border-bottom-color: #48484d;
+		border-right-color: #3c3c41;
+		box-shadow:
+			inset 0 1px 4px rgba(0, 0, 0, 0.7),
+			inset 0 0 0 1px rgba(120, 110, 80, 0.12);
+		border-radius: 2px;
+		padding: 0.6rem 0.7rem;
+	}
+
+	.eq-panel-title {
+		font-size: 0.72rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--eq-gold-bright);
+		border-bottom: 1px solid rgba(150, 130, 90, 0.35);
+		padding-bottom: 0.3rem;
+		margin-bottom: 0.5rem;
+		display: flex;
+		justify-content: space-between;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.eq-identity .eq-name {
+		font-size: 1.3rem;
+		color: var(--eq-gold-bright);
+		text-shadow: 0 1px 2px #000;
+	}
+
+	.eq-sub {
+		font-size: 0.8rem;
+		color: var(--eq-text);
+	}
+
+	.eq-faint {
+		color: #8a8470;
+		font-size: 0.72rem;
+		text-transform: none;
+		letter-spacing: normal;
+	}
+
+	.eq-vitals {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		font-size: 0.85rem;
+	}
+
+	.eq-row {
+		display: flex;
+		justify-content: space-between;
+	}
+
+	.eq-green {
+		color: var(--eq-green);
+	}
+	.eq-blue {
+		color: var(--eq-blue);
+	}
+	.eq-red {
+		color: var(--eq-red);
+	}
+	.eq-tan {
+		color: var(--eq-text);
+	}
+	.eq-dim {
+		color: #6f6a5a;
+	}
+
+	.eq-grid {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+
+	.eq-grid-row {
+		display: flex;
+		gap: 0.4rem;
+		flex-wrap: wrap;
+	}
+
+	.eq-slot {
+		position: relative;
+		width: 5.2rem;
+		height: 5.2rem;
+		flex: 0 0 auto;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		padding: 0.25rem;
+		background: linear-gradient(150deg, #212124, #101012 80%);
+		border: 2px solid #050506;
+		border-bottom-color: #4c4c52;
+		border-right-color: #3e3e44;
+		box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.8);
+		border-radius: 2px;
+		text-decoration: none;
+	}
+
+	.eq-slot-label {
+		color: #55524a;
+		font-size: 0.68rem;
+		letter-spacing: 0.1em;
+	}
+
+	.eq-filled {
+		cursor: pointer;
+	}
+
+	.eq-filled:hover {
+		outline: 1px solid var(--eq-gold-bright);
+	}
+
+	.eq-slot-name {
+		color: var(--eq-text);
+		font-size: 0.68rem;
+		line-height: 1.15;
+		overflow: hidden;
+		display: -webkit-box;
+		-webkit-line-clamp: 4;
+		line-clamp: 4;
+		-webkit-box-orient: vertical;
+	}
+
+	.eq-upgrade {
+		position: absolute;
+		top: 2px;
+		right: 3px;
+		color: var(--eq-gold-bright);
+		font-size: 0.62rem;
+		text-shadow: 0 1px 1px #000;
+	}
+
+	.eq-tooltip {
+		display: none;
+		position: absolute;
+		z-index: 30;
+		bottom: calc(100% + 4px);
+		left: 50%;
+		transform: translateX(-50%);
+		min-width: 11rem;
+		max-width: 16rem;
+		flex-direction: column;
+		gap: 0.1rem;
+		padding: 0.5rem 0.6rem;
+		font-size: 0.72rem;
+		text-align: left;
+		color: var(--eq-text);
+		background: #131315;
+		border: 1px solid var(--eq-gold);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.8);
+	}
+
+	.eq-tooltip b {
+		color: var(--eq-gold-bright);
+	}
+
+	.eq-filled:hover .eq-tooltip {
+		display: flex;
+	}
+
+	.eq-weight {
+		margin-top: 0.6rem;
+		display: flex;
+		justify-content: space-between;
+		font-size: 0.75rem;
+		letter-spacing: 0.08em;
+		border-top: 1px solid rgba(150, 130, 90, 0.35);
+		padding-top: 0.4rem;
+	}
+
+	.eq-bags {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+		gap: 0.6rem;
+	}
+
+	.eq-bag-grid {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+	}
+
+	.eq-baglink {
+		color: var(--eq-gold-bright);
+		text-decoration: none;
+	}
+
+	.eq-baglink:hover {
+		text-decoration: underline;
+	}
+
+	.eq-empty {
+		color: #8a8470;
+		font-size: 0.85rem;
+	}
+
+	.eq-tabpanel {
+		padding-top: var(--sp-2, 0.5rem);
+	}
+</style>
