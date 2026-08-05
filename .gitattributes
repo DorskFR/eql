@@ -1,0 +1,4 @@
+* text=auto
+
+vendor/eql-log-reader/headless.patch -text
+vendor/eql-log-reader/** text eol=lf
