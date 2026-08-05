@@ -162,6 +162,31 @@ export interface LogEvent {
 	payload: LogEventPayload;
 }
 
+export type Rect = [number, number, number, number];
+
+export interface LayoutSummary {
+	name: string;
+	screen_w: number;
+	screen_h: number;
+	windows: number;
+	updated_at: string;
+}
+
+export interface LayoutView {
+	name: string;
+	screen_w: number;
+	screen_h: number;
+	layout: Record<string, Rect>;
+	problems: string[];
+	updated_at: string;
+}
+
+export interface LayoutBody {
+	screen_w: number;
+	screen_h: number;
+	layout: Record<string, Rect>;
+}
+
 export class ApiError extends Error {
 	status: number;
 	constructor(status: number, message: string) {
@@ -188,6 +213,27 @@ async function get<T>(path: string): Promise<T> {
 	return (await response.json()) as T;
 }
 
+async function authed<T>(
+	method: string,
+	path: string,
+	token: string,
+	body?: unknown
+): Promise<T> {
+	const response = await fetch(path, {
+		method,
+		headers: {
+			authorization: `Bearer ${token}`,
+			...(body === undefined ? {} : { 'content-type': 'application/json' })
+		},
+		body: body === undefined ? undefined : JSON.stringify(body)
+	});
+	if (!response.ok) {
+		const text = await response.text();
+		throw new ApiError(response.status, envelopeError(text) || text || response.statusText);
+	}
+	return response.status === 204 ? (null as T) : ((await response.json()) as T);
+}
+
 export const endpoints = {
 	characters: () => get<CharacterSummary[]>('/api/v1/characters'),
 	inventory: (server: string, name: string) =>
@@ -207,5 +253,23 @@ export const endpoints = {
 	},
 	itemSearch: (query: string) =>
 		get<ItemRecord[]>(`/api/v1/items?q=${encodeURIComponent(query)}`),
-	item: (key: string) => get<ItemRecord>(`/api/v1/items/${encodeURIComponent(key)}`)
+	item: (key: string) => get<ItemRecord>(`/api/v1/items/${encodeURIComponent(key)}`),
+	layouts: () => get<LayoutSummary[]>('/api/v1/layouts'),
+	layout: (name: string) => get<LayoutView>(`/api/v1/layouts/${encodeURIComponent(name)}`),
+	layoutWindows: () => get<string[]>('/api/v1/layout-windows'),
+	saveLayout: (token: string, name: string, body: LayoutBody) =>
+		authed<LayoutView>('PUT', `/api/v1/layouts/${encodeURIComponent(name)}`, token, body),
+	cloneDefault: (token: string, name: string) =>
+		authed<LayoutView>(
+			'POST',
+			`/api/v1/layouts/${encodeURIComponent(name)}/clone-default`,
+			token
+		),
+	deleteLayout: (token: string, name: string) =>
+		authed<null>('DELETE', `/api/v1/layouts/${encodeURIComponent(name)}`, token)
+};
+
+export const bundleUrl = (name: string, skin: string) => {
+	const query = skin ? `?skin=${encodeURIComponent(skin)}` : '';
+	return `/api/v1/layouts/${encodeURIComponent(name)}/bundle${query}`;
 };

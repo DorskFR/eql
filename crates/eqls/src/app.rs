@@ -1,18 +1,21 @@
 use crate::{
+    skin::{self, SkinError},
     stats::{derive_gear_stats, is_equipped_location, GearStats},
     wiki::ItemStats,
 };
 use axum::{
+    body::Body,
     extract::{Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{from_fn_with_state, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use eql_core::{
     api::{InventoryUpload, LogBatch, LogEventKind},
     inventory::InventoryEntry,
+    layout::Layout,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{types::Json as SqlJson, PgPool, Row};
@@ -30,6 +33,11 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     let ingest = Router::new()
         .route("/api/v1/inventory", post(ingest))
         .route("/api/v1/events", post(ingest_events))
+        .route(
+            "/api/v1/layouts/{name}",
+            put(put_layout).delete(delete_layout),
+        )
+        .route("/api/v1/layouts/{name}/clone-default", post(clone_default))
         .layer(from_fn_with_state(state.clone(), require_machine_token));
 
     let api = Router::new()
@@ -48,6 +56,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         )
         .route("/api/v1/items", get(search_items))
         .route("/api/v1/items/{key}", get(get_item))
+        .route("/api/v1/layouts", get(list_layouts))
+        .route("/api/v1/layouts/{name}", get(get_layout))
+        .route("/api/v1/layouts/{name}/bundle", get(layout_bundle))
+        .route("/api/v1/layout-windows", get(layout_windows))
         .merge(ingest);
 
     let index = web_dist.join("index.html");
@@ -561,6 +573,189 @@ async fn get_item(
     Ok(Json(item_from_row(&row)?))
 }
 
+#[derive(Serialize)]
+struct LayoutSummary {
+    name: String,
+    screen_w: i32,
+    screen_h: i32,
+    windows: usize,
+    #[serde(with = "time::serde::rfc3339")]
+    updated_at: OffsetDateTime,
+}
+
+#[derive(Serialize)]
+struct LayoutView {
+    name: String,
+    screen_w: i32,
+    screen_h: i32,
+    layout: Layout,
+    problems: Vec<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    updated_at: OffsetDateTime,
+}
+
+#[derive(Deserialize)]
+struct LayoutBody {
+    screen_w: i32,
+    screen_h: i32,
+    layout: Layout,
+}
+
+fn layout_from_row(row: &sqlx::postgres::PgRow) -> Result<LayoutView, sqlx::Error> {
+    let layout: SqlJson<Layout> = row.try_get("layout")?;
+    let screen_w: i32 = row.try_get("screen_w")?;
+    let screen_h: i32 = row.try_get("screen_h")?;
+    Ok(LayoutView {
+        name: row.try_get("name")?,
+        screen_w,
+        screen_h,
+        problems: layout.0.validate(screen_w, screen_h),
+        layout: layout.0,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+async fn list_layouts(State(state): State<AppState>) -> Result<Json<Vec<LayoutSummary>>, AppError> {
+    let rows = sqlx::query(
+        "select name, screen_w, screen_h, layout, updated_at from layouts order by name asc",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                let layout: SqlJson<Layout> = row.try_get("layout")?;
+                Ok(LayoutSummary {
+                    name: row.try_get("name")?,
+                    screen_w: row.try_get("screen_w")?,
+                    screen_h: row.try_get("screen_h")?,
+                    windows: layout.0 .0.len(),
+                    updated_at: row.try_get("updated_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+    ))
+}
+
+async fn layout_windows() -> Json<Vec<&'static str>> {
+    Json(skin::template_windows().collect())
+}
+
+async fn fetch_layout(pool: &PgPool, name: &str) -> Result<LayoutView, AppError> {
+    let row = sqlx::query(
+        "select name, screen_w, screen_h, layout, updated_at from layouts where name = $1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(layout_from_row(&row)?)
+}
+
+async fn get_layout(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<LayoutView>, AppError> {
+    Ok(Json(fetch_layout(&state.pool, &name).await?))
+}
+
+/// A layout with overlaps is still storable; the problems ride back so the
+/// editor can flag them.
+async fn store_layout(
+    pool: &PgPool,
+    name: &str,
+    body: LayoutBody,
+) -> Result<(StatusCode, Json<LayoutView>), AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::EmptyLayoutName);
+    }
+    if body.screen_w <= 0 || body.screen_h <= 0 {
+        return Err(AppError::BadScreen(body.screen_w, body.screen_h));
+    }
+    let row = sqlx::query(
+        "insert into layouts (name, screen_w, screen_h, layout) values ($1, $2, $3, $4) \
+         on conflict (name) do update set screen_w = excluded.screen_w, \
+             screen_h = excluded.screen_h, layout = excluded.layout, updated_at = now() \
+         returning name, screen_w, screen_h, layout, updated_at",
+    )
+    .bind(name)
+    .bind(body.screen_w)
+    .bind(body.screen_h)
+    .bind(SqlJson(&body.layout))
+    .fetch_one(pool)
+    .await?;
+    Ok((StatusCode::OK, Json(layout_from_row(&row)?)))
+}
+
+async fn put_layout(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<LayoutBody>,
+) -> Result<(StatusCode, Json<LayoutView>), AppError> {
+    store_layout(&state.pool, &name, body).await
+}
+
+async fn clone_default(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<(StatusCode, Json<LayoutView>), AppError> {
+    store_layout(
+        &state.pool,
+        &name,
+        LayoutBody {
+            screen_w: skin::TEMPLATE_WIDTH,
+            screen_h: skin::TEMPLATE_HEIGHT,
+            layout: skin::default_layout(),
+        },
+    )
+    .await
+}
+
+async fn delete_layout(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let deleted = sqlx::query("delete from layouts where name = $1")
+        .bind(&name)
+        .execute(&state.pool)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct BundleQuery {
+    skin: Option<String>,
+}
+
+async fn layout_bundle(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<BundleQuery>,
+) -> Result<Response, AppError> {
+    let view = fetch_layout(&state.pool, &name).await?;
+    let requested = query.skin.filter(|s| !s.is_empty()).unwrap_or(view.name);
+    let skin_name = skin::sanitize_skin_name(&requested);
+    let files = skin::generate_bundle(&view.layout, &requested, view.screen_w, view.screen_h)?;
+    let zipped = skin::zip_bundle(&files)?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{skin_name}.zip\""),
+            ),
+        ],
+        Body::from(zipped),
+    )
+        .into_response())
+}
+
 #[derive(Debug, thiserror::Error)]
 enum AppError {
     #[error("missing or invalid bearer token")]
@@ -575,6 +770,12 @@ enum AppError {
     BadCursor(String),
     #[error("captured_at {0} is not a valid unix timestamp")]
     BadCapturedAt(i64),
+    #[error("layout name must not be empty")]
+    EmptyLayoutName,
+    #[error("screen size must be positive, got {0}x{1}")]
+    BadScreen(i32, i32),
+    #[error(transparent)]
+    Skin(#[from] SkinError),
     #[error("no inventory snapshot for that character")]
     NotFound,
     #[error(transparent)]
@@ -589,6 +790,9 @@ impl IntoResponse for AppError {
             | AppError::EmptyEntries
             | AppError::EmptyEvents
             | AppError::BadCapturedAt(_)
+            | AppError::EmptyLayoutName
+            | AppError::BadScreen(_, _)
+            | AppError::Skin(_)
             | AppError::BadCursor(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Database(ref err) => {
@@ -856,6 +1060,203 @@ mod tests {
         })
         .await;
         assert_eq!(unknown.as_array().unwrap().len(), 0);
+    }
+
+    fn layout_write(method: &str, uri: &str, token: Option<&str>, body: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    }
+
+    const SIMPLE_LAYOUT: &str = r#"{"screen_w":3840,"screen_h":2160,
+        "layout":{"PlayerWindow":[420,1290,660,320],"MainChat":[420,1830,1480,310]}}"#;
+
+    #[tokio::test]
+    async fn layout_writes_need_the_machine_token() {
+        for request in [
+            layout_write("PUT", "/api/v1/layouts/mine", None, SIMPLE_LAYOUT),
+            layout_write("PUT", "/api/v1/layouts/mine", Some("wrong"), SIMPLE_LAYOUT),
+            layout_write("DELETE", "/api/v1/layouts/mine", None, ""),
+            layout_write("POST", "/api/v1/layouts/mine/clone-default", None, ""),
+        ] {
+            assert_eq!(status_of(request).await, StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn layout_reads_are_public_and_the_window_list_needs_no_database() {
+        let request = Request::builder()
+            .uri("/api/v1/layouts")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(request).await, StatusCode::SERVICE_UNAVAILABLE);
+
+        let app = test_app();
+        let (status, windows) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/layout-windows")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let windows = windows.as_array().unwrap().clone();
+        assert_eq!(windows.len(), 13);
+        assert!(windows.contains(&serde_json::json!("MainChat")));
+    }
+
+    #[tokio::test]
+    async fn a_bad_screen_size_is_rejected_before_the_database() {
+        let body = r#"{"screen_w":0,"screen_h":2160,"layout":{}}"#;
+        let request = layout_write("PUT", "/api/v1/layouts/mine", Some("s3cret"), body);
+        assert_eq!(status_of(request).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn layouts_round_trip_and_produce_a_downloadable_bundle() {
+        let Some((app, _pool)) = live_app().await else {
+            return;
+        };
+        sqlx::query("truncate layouts restart identity")
+            .execute(&_pool)
+            .await
+            .unwrap();
+
+        let (status, cloned) = json_of(
+            &app,
+            layout_write(
+                "POST",
+                "/api/v1/layouts/dorskui/clone-default",
+                Some("s3cret"),
+                "",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cloned["layout"].as_object().unwrap().len(), 13);
+        assert_eq!(cloned["problems"].as_array().unwrap().len(), 0);
+        assert_eq!(cloned["screen_w"], 3840);
+
+        let overlapping = r#"{"screen_w":3840,"screen_h":2160,
+            "layout":{"PlayerWindow":[0,0,900,400],"GroupWindow":[100,100,900,400],
+                      "MainChat":[3000,2000,2000,500]}}"#;
+        let (status, stored) = json_of(
+            &app,
+            layout_write(
+                "PUT",
+                "/api/v1/layouts/dorskui",
+                Some("s3cret"),
+                overlapping,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let problems = stored["problems"].as_array().unwrap().clone();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems
+            .iter()
+            .any(|p| p.as_str().unwrap().contains("offscreen")));
+        assert!(problems
+            .iter()
+            .any(|p| p.as_str().unwrap().contains("overlaps")));
+
+        let (status, fetched) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/layouts/dorskui")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            fetched["layout"]["PlayerWindow"],
+            serde_json::json!([0, 0, 900, 400])
+        );
+        assert_eq!(fetched["problems"].as_array().unwrap().len(), 2);
+
+        let (status, listed) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/layouts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["windows"], 3);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/layouts/dorskui/bundle?skin=My%20Skin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/zip");
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"my_skin.zip\""
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let names: Vec<&str> = archive.file_names().collect();
+        assert!(names.contains(&"uifiles/my_skin/EQUI_PlayerWindow.xml"));
+        assert!(names.contains(&skin::INI_NAME));
+
+        let unknown = r#"{"screen_w":3840,"screen_h":2160,"layout":{"BankWindow":[0,0,10,10]}}"#;
+        let (status, error) = json_of(
+            &app,
+            layout_write("PUT", "/api/v1/layouts/bad", Some("s3cret"), unknown),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "storing is permissive");
+        assert_eq!(error["problems"].as_array().unwrap().len(), 0);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/layouts/bad/bundle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let deleted = app
+            .clone()
+            .oneshot(layout_write(
+                "DELETE",
+                "/api/v1/layouts/bad",
+                Some("s3cret"),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let missing = app
+            .clone()
+            .oneshot(layout_write(
+                "DELETE",
+                "/api/v1/layouts/bad",
+                Some("s3cret"),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

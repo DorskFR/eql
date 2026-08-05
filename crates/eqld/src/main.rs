@@ -1,19 +1,36 @@
-use eqld::{config::Config, daemon::Daemon};
+use eqld::{config::Config, daemon::Daemon, skin};
 use std::path::PathBuf;
 
-fn config_path() -> PathBuf {
-    std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("eqld.toml"))
+const SUBCOMMANDS: &[&str] = &["install-skin"];
+
+/// `eqld [config.toml] [subcommand [args…]]` — the optional leading config path
+/// is anything that is not a subcommand name.
+fn split_args(args: Vec<String>) -> (PathBuf, Vec<String>) {
+    let leading_config = args
+        .first()
+        .is_some_and(|first| !SUBCOMMANDS.contains(&first.as_str()));
+    let (path, rest) = if leading_config {
+        (PathBuf::from(&args[0]), &args[1..])
+    } else {
+        (PathBuf::from("eqld.toml"), &args[..])
+    };
+    (path, rest.to_vec())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let path = config_path();
+    let (path, rest) = split_args(std::env::args().skip(1).collect());
     let config = Config::load(&path)?;
+
+    if let Some(subcommand) = rest.first() {
+        return match subcommand.as_str() {
+            "install-skin" => Ok(skin::run(&config, &rest[1..]).await?),
+            other => Err(format!("unknown subcommand {other:?}").into()),
+        };
+    }
+
     let mut daemon = Daemon::new(config)?;
 
     tracing::info!(
