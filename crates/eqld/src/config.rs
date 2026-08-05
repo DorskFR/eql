@@ -9,6 +9,50 @@ pub struct Config {
     pub state: StateConfig,
     #[serde(default)]
     pub harvest: HarvestConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub log_reader: LogReaderConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LogReaderConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub exe: Option<PathBuf>,
+    pub version: Option<String>,
+    #[serde(default = "default_replay_secs")]
+    pub replay_secs: u64,
+    #[serde(default = "default_replay_timeout_secs")]
+    pub replay_timeout_secs: u64,
+}
+
+impl LogReaderConfig {
+    pub fn version(&self) -> &str {
+        self.version
+            .as_deref()
+            .unwrap_or(crate::tools::DEFAULT_VERSION)
+    }
+
+    pub fn replay_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.replay_secs.max(10))
+    }
+
+    pub fn replay_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.replay_timeout_secs.max(10))
+    }
+}
+
+fn default_replay_secs() -> u64 {
+    120
+}
+
+fn default_replay_timeout_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,7 +113,7 @@ impl Config {
     }
 
     pub fn harvest_dir(&self) -> Option<PathBuf> {
-        if !self.harvest.enabled {
+        if !self.harvest.enabled && !self.tools.log_reader.enabled {
             return None;
         }
         self.harvest
@@ -175,6 +219,73 @@ mod tests {
             crate::harvest::default_dir()
         );
         assert_eq!(with("[harvest]\ndir = \"/tmp/reader\"").harvest_dir(), None);
+    }
+
+    #[test]
+    fn enabling_the_log_reader_switches_harvest_on_without_a_harvest_section() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [tools.log_reader]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        assert!(config.tools.log_reader.enabled);
+        assert_eq!(config.harvest_dir(), crate::harvest::default_dir());
+        assert_eq!(
+            config.tools.log_reader.version(),
+            crate::tools::DEFAULT_VERSION
+        );
+        assert_eq!(config.tools.log_reader.replay_interval().as_secs(), 120);
+        assert_eq!(config.tools.log_reader.replay_timeout().as_secs(), 600);
+    }
+
+    #[test]
+    fn log_reader_overrides_are_read_and_clamped() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [tools.log_reader]
+            enabled = true
+            exe = "/opt/eql/eql_atlas.exe"
+            version = "v2.0"
+            replay_secs = 0
+            replay_timeout_secs = 1
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.tools.log_reader.exe,
+            Some(PathBuf::from("/opt/eql/eql_atlas.exe"))
+        );
+        assert_eq!(config.tools.log_reader.version(), "v2.0");
+        assert_eq!(config.tools.log_reader.replay_interval().as_secs(), 10);
+        assert_eq!(config.tools.log_reader.replay_timeout().as_secs(), 10);
+    }
+
+    #[test]
+    fn the_log_reader_stays_off_by_default() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            "#,
+        )
+        .unwrap();
+        assert!(!config.tools.log_reader.enabled);
+        assert_eq!(config.harvest_dir(), None);
     }
 
     #[test]

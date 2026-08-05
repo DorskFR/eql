@@ -117,6 +117,8 @@ pub struct Daemon {
     state_path: PathBuf,
     backoff: Backoff,
     watched: Option<Watched>,
+    runner: Option<crate::tools::Runner>,
+    last_replay: Option<std::time::Instant>,
 }
 
 impl Daemon {
@@ -128,6 +130,18 @@ impl Daemon {
         let state_path = config.state_path();
         let state = State::load(&state_path).map_err(DaemonError::State)?;
         let backoff = Backoff::new(config.poll_interval());
+        let runner = config
+            .tools
+            .log_reader
+            .enabled
+            .then(|| crate::tools::Runner::discover(config.tools.log_reader.exe.as_deref()))
+            .flatten();
+        if config.tools.log_reader.enabled && runner.is_none() {
+            tracing::warn!(
+                hint = crate::tools::install_hint(&config.tools.log_reader),
+                "log reader enabled but not found; harvest will stay empty"
+            );
+        }
         Ok(Self {
             config,
             client,
@@ -135,7 +149,44 @@ impl Daemon {
             state_path,
             backoff,
             watched: None,
+            runner,
+            last_replay: None,
         })
+    }
+
+    pub fn runner(&self) -> Option<&crate::tools::Runner> {
+        self.runner.as_ref()
+    }
+
+    fn replay_due(&self) -> bool {
+        self.last_replay
+            .is_none_or(|at| at.elapsed() >= self.config.tools.log_reader.replay_interval())
+    }
+
+    async fn run_replay(&mut self, root: &Path) {
+        let Some(runner) = self.runner.clone() else {
+            return;
+        };
+        if !self.replay_due() {
+            return;
+        }
+        let Ok(paths) = logs::scan(root) else {
+            return;
+        };
+        self.last_replay = Some(std::time::Instant::now());
+        let report = crate::tools::replay_all(
+            &runner,
+            &paths,
+            self.config.tools.log_reader.replay_timeout(),
+        )
+        .await;
+        if report.ran > 0 || report.failed > 0 {
+            tracing::debug!(
+                replayed = report.ran,
+                failed = report.failed,
+                "log reader replay"
+            );
+        }
     }
 
     pub fn config(&self) -> &Config {
@@ -179,6 +230,8 @@ impl Daemon {
 
         let (logs_dirty, log_files) = self.tail_logs(&root, &mut report).await;
         dirty_state |= logs_dirty;
+
+        self.run_replay(&root).await;
 
         let mut harvest_files = None;
         if let Some(dir) = self.config.harvest_dir() {
