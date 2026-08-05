@@ -125,6 +125,26 @@ fn harness(game: &TempDir, harvest: Option<&TempDir>, addr: SocketAddr) -> Daemo
     Daemon::new(config).unwrap()
 }
 
+/// `QuestState.save()` returns early while nothing is tracked, so a character
+/// who has never run `--quest add` has no quest JSON at all. Normal, not a gap.
+#[tokio::test]
+async fn a_character_with_no_tracked_quests_ships_the_rest_without_complaint() {
+    let recorder = Recorder::new(201);
+    let addr = spawn_server(recorder.clone()).await;
+    let game = tempfile::tempdir().unwrap();
+    let harvest = tempfile::tempdir().unwrap();
+    plant(&harvest, ATLAS);
+    plant(&harvest, ALLTIME);
+    let mut daemon = harness(&game, Some(&harvest), addr);
+
+    let report = daemon.tick().await;
+    assert_eq!(report.harvested, 2);
+    assert_eq!(report.parse_failures, 0);
+    assert_eq!(report.retryable_failures, 0);
+    assert_eq!(report.rejections, 0);
+    assert!(!recorder.kinds().iter().any(|kind| kind == "quest"));
+}
+
 #[tokio::test]
 async fn ships_every_kind_once_with_the_bearer_token() {
     let recorder = Recorder::new(201);

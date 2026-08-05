@@ -270,6 +270,54 @@ async fn a_hidden_overlay_is_still_supervised() {
 }
 
 #[tokio::test]
+async fn a_hidden_meter_runs_the_headless_tool_when_the_patched_build_is_installed() {
+    let _game = GAME.lock().await;
+    let root = TempDir::new().unwrap();
+    let tools = TempDir::new().unwrap();
+    let log = game_log(&root);
+    let gui = tools.path().join("gui.txt");
+    let headless = tools.path().join("headless.txt");
+    install(&tools, "eql_atlas", "exit 0");
+    install(
+        &tools,
+        "eql_dps_meter",
+        &format!("echo \"$1\" > {}\nexec sleep 120", gui.display()),
+    );
+    install(
+        &tools,
+        "eql_headless",
+        &format!("echo \"$1\" > {}\nexec sleep 120", headless.display()),
+    );
+
+    let mut daemon = Daemon::new(tuned(
+        root.path(),
+        tools.path(),
+        "\"dps\"",
+        false,
+        "hidden = [\"dps\"]",
+    ))
+    .unwrap();
+    assert_eq!(daemon.hidden_overlays(), vec!["dps"]);
+    assert_eq!(daemon.headless_overlays(), vec!["dps"]);
+
+    let mut game = fake_game(&tools);
+    settle().await;
+    daemon.tick().await;
+    settle().await;
+
+    assert_eq!(
+        std::fs::read_to_string(&headless).unwrap().trim(),
+        log.display().to_string(),
+        "the headless tool got the log, and it takes it exactly as the meter does"
+    );
+    assert!(!gui.exists(), "no window was ever started");
+
+    daemon.shutdown().await;
+    game.kill().unwrap();
+    game.wait().unwrap();
+}
+
+#[tokio::test]
 async fn a_hidden_name_that_is_not_an_overlay_is_refused_not_launched() {
     let _game = GAME.lock().await;
     let root = TempDir::new().unwrap();

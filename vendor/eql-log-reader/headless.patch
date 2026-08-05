@@ -1,0 +1,575 @@
+diff --git a/eql_atlas.py b/eql_atlas.py
+index aaae642..266f1d4 100644
+--- a/eql_atlas.py
++++ b/eql_atlas.py
+@@ -1590,6 +1590,32 @@ def learn_channel_from_log(log_path, tracker):
+         tracker._learn_channel(last)
+ 
+ 
++def attach_quest_layer(tracker, char, server):
++    """Wire the quest layer onto a tracker with no GUI.
++
++    Safe to run repeatedly: the caller's ingest resumes from the Atlas DB's
++    persisted log_pos, so a loot line is credited exactly once -- the same
++    guarantee the overlay has, for the same reason.
++
++    Returns (QuestDB, QuestState), or (None, None) if the quest module or
++    its DB is unavailable -- replay must never fail over the quest layer.
++    """
++    try:
++        from eql_quest import QuestDB, QuestState
++    except ImportError:
++        return None, None
++    quest_db = QuestDB(APP_DIR)
++    if not quest_db.ok:
++        return None, None
++    quest_state = QuestState(
++        data_path(f"eql_quest_{char}_{server}.json", APP_DIR))
++    tracker.on_loot = lambda item, qty, t: \
++        quest_state.credit_loot(quest_db, item, qty, t)
++    tracker.on_npc_say = lambda npc, text, t: \
++        [quest_state.confirm(qid, t) for qid in quest_db.match_handin(npc, text)]
++    return quest_db, quest_state
++
++
+ def replay(log_path):
+     char, server = char_server_from(log_path)
+     baseline = Baseline()
+@@ -1605,6 +1631,7 @@ def replay(log_path):
+         pass
+     tracker = AtlasTracker(db, baseline, session_from=float("inf"),
+                            command_channel=db.data.get("command_channel", ""))
++    quest_db, quest_state = attach_quest_layer(tracker, char, server)
+     t0 = time.time()
+     start = db.log_pos(log_path) or 0
+     end = ingest(log_path, tracker, start)
+@@ -1612,6 +1639,15 @@ def replay(log_path):
+     if not tracker.cmd_channel:
+         learn_channel_from_log(log_path, tracker)
+     db.save()
++    if quest_state is not None:
++        quest_state.save()
++        done, total = 0, len(quest_state.data["order"])
++        for qid in quest_state.data["order"]:
++            g, n = quest_state.progress(quest_db, qid)
++            done += g >= n and n > 0
++        print(f"quests: {total} tracked ({done} complete), "
++              f"{quest_state.confirmed_count()} confirmed -> "
++              f"{quest_state.path}")
+ 
+     tot = db.data["totals"]
+     print(f"replayed {end - start:,} bytes in {time.time() - t0:.1f}s "
+@@ -2871,6 +2907,15 @@ def main():
+             raise SystemExit("usage: python eql_atlas.py --replay <eqlog file>")
+         replay(args[1])
+         return
++    if args and args[0] == "--quest":
++        if len(args) < 3:
++            raise SystemExit(
++                "usage: python eql_atlas.py --quest <eqlog file> <command>")
++        import eql_quest_cli
++        char, server = char_server_from(args[1])
++        eql_quest_cli.run(
++            data_path(f"eql_quest_{char}_{server}.json", APP_DIR), args[2:])
++        return
+     log_path = args[0] if args else ""
+     if not log_path:
+         try:
+diff --git a/eql_dps_meter.py b/eql_dps_meter.py
+index e061fcb..2fa135d 100644
+--- a/eql_dps_meter.py
++++ b/eql_dps_meter.py
+@@ -2369,8 +2369,13 @@ def run_overlay(log_path):
+ # ----------------------------------------------------------------------------
+ def main():
+     log_path = ""
+-    if len(sys.argv) > 1:
+-        log_path = sys.argv[1]
++    args = sys.argv[1:]
++    if "--headless" in args:
++        import eql_headless
++        eql_headless.main([a for a in args if a != "--headless"])
++        return
++    if args:
++        log_path = args[0]
+     else:
+         try:
+             s = Settings(SETTINGS_FILE)
+diff --git a/eql_headless.py b/eql_headless.py
+new file mode 100644
+index 0000000..8176e0f
+--- /dev/null
++++ b/eql_headless.py
+@@ -0,0 +1,181 @@
++#!/usr/bin/env python3
++"""
++EQL Headless Runner
++===================
++Runs the DPS meter's lifetime-stats layer (AllTimeStore) with no GUI: no
++tkinter import, no window, no desktop. Same LogWatcher/CombatTracker/
++AllTimeStore objects the overlay uses, driven by a plain loop instead of
++tk's `after` scheduler, so the eql_alltime_*.json it writes is produced by
++exactly the same code as the overlay's.
++
++Entry point:  python eql_dps_meter.py --headless <eqlog file>
++
++Cadence mirrors the overlay: the log is polled every POLL_INTERVAL_MS and
++AllTimeStore.tick() runs on that same beat, while CombatTracker.maybe_timeout()
++runs on the RENDER_INTERVAL_MS beat (in the overlay that call lives in
++render(), not poll()). Getting both beats right matters: without
++maybe_timeout a fight never ends when the log goes quiet, and combat_secs
++would keep accruing through AFK time.
++
++SIGINT/SIGTERM flush the store before exiting, the way quit_app() does.
++
++Settings are read but never written -- a headless run must not clobber the
++overlay's saved window position or log_path.
++"""
++
++import os
++import signal
++import sys
++import time
++
++from eql_overlay_common import LogWatcher, Settings, SEED_BYTES, POLL_INTERVAL_MS
++from eql_combat_tracker import CombatTracker
++from eql_spell_db import SPELL_DB
++import eql_dps_meter as meter
++
++
++def _active_timeout(settings):
++    """The overlay's active_timeout(), read-only (eql_dps_meter.run_overlay)."""
++    layout = settings.get("layout", "vertical")
++    if layout in ("tri", "tri_h"):
++        mode = "hour"
++    else:
++        u = settings.get("units", "sec")
++        mode = u if u in ("sec", "min", "hour") else "sec"
++    keys = {"sec": "idle_timeout", "min": "idle_timeout_min",
++            "hour": "idle_timeout_hour"}
++    defaults = {"sec": 45, "min": 60, "hour": 3600}
++    return float(settings.get(keys[mode], defaults[mode]))
++
++
++class HeadlessMeter:
++    """The overlay's open_log() + poll() + quit_app(), minus the UI."""
++
++    def __init__(self, log_path, settings=None, verbose=False):
++        self.log_path = log_path
++        self.verbose = verbose
++        self.settings = settings if settings is not None else Settings(
++            meter.SETTINGS_FILE, {})
++        self.timeout = _active_timeout(self.settings)
++        SPELL_DB.set_game_dir_hint(
++            os.path.dirname(os.path.dirname(os.path.abspath(log_path))))
++        self.tracker = CombatTracker(
++            self_name=self._char_name(log_path), idle_timeout=self.timeout)
++        self.watcher = LogWatcher(log_path)
++        self.watcher.add_handler(self.tracker.handle_line)
++        self.watcher.seed(max_bytes=SEED_BYTES)
++        self.alltime = meter.AllTimeStore(log_path, self.tracker.player_classes)
++        self.alltime.snapshot_baseline(self.tracker)
++        self.classes = self.tracker.player_classes
++        self._stop = False
++
++    @staticmethod
++    def _char_name(path):
++        import re
++        m = re.match(r"eqlog_([A-Za-z]+)", os.path.basename(path))
++        return m.group(1) if m else "You"
++
++    def stop(self, *_):
++        self._stop = True
++
++    def poll_once(self):
++        """One beat of the overlay's poll(): identical body."""
++        try:
++            self.watcher.poll()
++            tracker = self.tracker
++            in_combat = tracker.current is not None
++            if tracker.player_classes != self.classes:
++                old = self.alltime
++                if old:
++                    old.tick(tracker, in_combat)
++                    old.save()
++                store = meter.AllTimeStore(self.log_path, tracker.player_classes)
++                store.snapshot_baseline(tracker)
++                self.alltime = store
++                self.classes = tracker.player_classes
++                self._log(f"build switch -> {tracker.player_classes} "
++                          f"({os.path.basename(store.path)})")
++            self.alltime.tick(tracker, in_combat)
++        except Exception as exc:            # never let a parse hiccup stop tailing
++            self._log(f"poll error: {exc!r}")
++
++    def run(self, max_seconds=None):
++        self._log(f"headless meter on {self.log_path}")
++        self._log(f"alltime -> {self.alltime.path} "
++                  f"(idle_timeout {self.timeout:g}s)")
++        started = time.monotonic()
++        next_poll = started
++        next_render = started
++        poll_s = POLL_INTERVAL_MS / 1000.0
++        render_s = meter.RENDER_INTERVAL_MS / 1000.0
++        while not self._stop:
++            now = time.monotonic()
++            if now >= next_render:
++                self.tracker.maybe_timeout()
++                next_render = now + render_s
++            if now >= next_poll:
++                self.poll_once()
++                next_poll = now + poll_s
++            if max_seconds is not None and now - started >= max_seconds:
++                break
++            time.sleep(max(0.0, min(next_render, next_poll) - time.monotonic()))
++        self.shutdown()
++
++    def shutdown(self):
++        """quit_app()'s flush."""
++        self.alltime.save()
++        self._log(f"saved {self.alltime.path}")
++
++    def _log(self, msg):
++        # a PyInstaller console=False build has no usable stdout
++        if not self.verbose:
++            return
++        try:
++            print(f"[eql-headless] {msg}", flush=True)
++        except (OSError, ValueError, AttributeError):
++            pass
++
++
++def run(log_path, verbose=True, max_seconds=None):
++    m = HeadlessMeter(log_path, verbose=verbose)
++    for sig in (signal.SIGINT, getattr(signal, "SIGTERM", None),
++                getattr(signal, "SIGBREAK", None)):
++        if sig is not None:
++            try:
++                signal.signal(sig, m.stop)
++            except (ValueError, OSError):
++                pass
++    m.run(max_seconds=max_seconds)
++    return m
++
++
++def main(argv):
++    """`eql_dps_meter.py --headless <log> [--seconds N] [--quiet]`"""
++    log_path = ""
++    seconds = None
++    verbose = True
++    i = 0
++    while i < len(argv):
++        a = argv[i]
++        if a == "--seconds":
++            i += 1
++            seconds = float(argv[i])
++        elif a == "--quiet":
++            verbose = False
++        elif not log_path:
++            log_path = a
++        i += 1
++    if not log_path:
++        try:
++            log_path = Settings(meter.SETTINGS_FILE, {}).get("log_path", "")
++        except Exception:
++            log_path = ""
++    if not log_path or not os.path.isfile(log_path):
++        raise SystemExit(
++            "usage: python eql_dps_meter.py --headless <eqlog file> "
++            "[--seconds N] [--quiet]")
++    run(log_path, verbose=verbose, max_seconds=seconds)
++
++
++if __name__ == "__main__":
++    main(sys.argv[1:])
+diff --git a/eql_quest_cli.py b/eql_quest_cli.py
+new file mode 100644
+index 0000000..54568c1
+--- /dev/null
++++ b/eql_quest_cli.py
+@@ -0,0 +1,134 @@
++#!/usr/bin/env python3
++"""
++EQL Quest CLI
++=============
++Curate the tracked-quest list without the Atlas overlay's Quest window.
++
++Everything the QuestWindow does to QuestState -- add, track, reorder,
++remove, hand-credit an item you already owned -- is a plain method call;
++only the *presentation* was tkinter. This module exposes those calls so a
++headless install (a daemon, a server, a scripted setup) can build the same
++list, after which `eql_atlas.py --replay` credits loot against it.
++
++    python eql_atlas.py --quest <eqlog file> search "bone chips"
++    python eql_atlas.py --quest <eqlog file> add "bone chips" --pick 0
++    python eql_atlas.py --quest <eqlog file> track "<qid>"
++    python eql_atlas.py --quest <eqlog file> list
++    python eql_atlas.py --quest <eqlog file> have "<qid>" "Bone Chips" 4
++    python eql_atlas.py --quest <eqlog file> remove "<qid>"
++
++`--era N` (0 classic, 1 kunark, 2 velious, 3 luclin, 4 pop) gates search
++exactly as the overlay's era checkboxes do; the default is classic-only,
++matching a fresh settings file.
++"""
++
++import sys
++
++from eql_quest import QuestDB, QuestState
++
++
++def _fmt(qdb, state, qid):
++    q = qdb.get(qid)
++    name = q["name"] if q else "(not in DB)"
++    zone = qdb.zones.get(q["z"], q["z"]) if q else "?"
++    got, need = state.progress(qdb, qid)
++    marks = "*" if state.current() == qid else " "
++    conf = "confirmed" if state.is_confirmed(qid) else ""
++    return (f" {marks} {name} -- {q['n'] if q else '?'} [{zone}] "
++            f"{got}/{need} {conf}\n     qid: {qid}")
++
++
++def _resolve(qdb, state, arg, era, pick):
++    """A qid verbatim, or the `pick`-th search hit for a term."""
++    if "|" in arg:
++        return arg
++    hits = qdb.search(arg, era)
++    if not hits:
++        raise SystemExit(f"no quest matches {arg!r} at era {era}")
++    if pick >= len(hits):
++        raise SystemExit(f"--pick {pick} out of range ({len(hits)} hits)")
++    return hits[pick]["qid"]
++
++
++def run(state_path, argv):
++    if not argv:
++        raise SystemExit(__doc__)
++    era = 0
++    pick = 0
++    args = []
++    i = 0
++    while i < len(argv):
++        if argv[i] == "--era":
++            i += 1
++            era = int(argv[i])
++        elif argv[i] == "--pick":
++            i += 1
++            pick = int(argv[i])
++        else:
++            args.append(argv[i])
++        i += 1
++
++    from eql_atlas import APP_DIR
++    qdb = QuestDB(APP_DIR)
++    if not qdb.ok:
++        raise SystemExit("no quest DB -- eql_quest_db.json.gz is missing")
++    state = QuestState(state_path)
++    cmd, rest = args[0], args[1:]
++
++    if cmd == "list":
++        cur = state.current()
++        print(f"{state_path}\n{len(state.data['order'])} tracked, "
++              f"{state.confirmed_count()} confirmed"
++              + (f", tracking {cur}" if cur else ", tracking nothing"))
++        for qid in state.data["order"]:
++            print(_fmt(qdb, state, qid))
++
++    elif cmd == "search":
++        hits = qdb.search(" ".join(rest), era)
++        print(f"{len(hits)} hit(s) at era {era}")
++        for n, q in enumerate(hits[:25]):
++            print(f"[{n}] {q['name']} -- {q['n']} "
++                  f"[{qdb.zones.get(q['z'], q['z'])}]\n     qid: {q['qid']}")
++
++    elif cmd in ("add", "track"):
++        qid = _resolve(qdb, state, " ".join(rest), era, pick)
++        added = state.add(qid)
++        if cmd == "track":
++            state.set_current(qid)
++        print(("added " if added else "already on the list: ")
++              + f"{qdb.get(qid)['name']}\n{_fmt(qdb, state, qid)}")
++
++    elif cmd == "remove":
++        qid = _resolve(qdb, state, " ".join(rest), era, pick)
++        state.remove(qid)
++        print(f"removed {qid}")
++
++    elif cmd == "move":
++        qid = _resolve(qdb, state, rest[0], era, pick)
++        state.move(qid, int(rest[1]))
++        print(f"moved {qid} by {rest[1]}")
++
++    elif cmd == "have":
++        qid = _resolve(qdb, state, rest[0], era, pick)
++        iid = qdb.item_id(rest[1])
++        if not iid:
++            raise SystemExit(f"unknown item {rest[1]!r}")
++        state.set_have(qid, iid, int(rest[2]))
++        print(_fmt(qdb, state, qid))
++
++    else:
++        raise SystemExit(__doc__)
++    state.save()
++
++
++def main(argv):
++    if len(argv) < 2:
++        raise SystemExit(__doc__)
++    from eql_atlas import APP_DIR, char_server_from
++    from eql_overlay_common import data_path
++    char, server = char_server_from(argv[0])
++    run(data_path(f"eql_quest_{char}_{server}.json", APP_DIR), argv[1:])
++
++
++if __name__ == "__main__":
++    main(sys.argv[1:])
+diff --git a/eql_suite.spec b/eql_suite.spec
+index 75d6926..f6989ac 100644
+--- a/eql_suite.spec
++++ b/eql_suite.spec
+@@ -31,7 +31,16 @@ import os
+ ICON = "icon.ico" if os.path.exists("icon.ico") else None
+ 
+ TOOLS = ["eql_launcher", "eql_friend_overlay", "eql_dps_meter",
+-         "eql_session_report", "eql_atlas"]
++         "eql_session_report", "eql_atlas",
++         "eql_headless", "eql_quest_cli"]
++
++# these two are stdout-driven, so they must be console subsystem binaries;
++# everything else stays windowed
++CONSOLE_TOOLS = {"eql_headless", "eql_quest_cli"}
++
++# reachable only through lazy in-function imports (eql_dps_meter.main's
++# --headless, eql_atlas.main's --quest)
++HIDDEN = {"eql_dps_meter": ["eql_headless"], "eql_atlas": ["eql_quest_cli"]}
+ 
+ # The Atlas ships its optional "pre-discovered" baseline (distilled Project
+ # Quarm database -- see eql_atlas_baseline_build.py) and the quest database
+@@ -48,8 +57,8 @@ for tool in TOOLS:
+         [f"{tool}.py"],
+         pathex=[],
+         binaries=[],
+-        datas=ATLAS_DATAS if tool == "eql_atlas" else [],
+-        hiddenimports=[],
++        datas=ATLAS_DATAS if tool in ("eql_atlas", "eql_quest_cli") else [],
++        hiddenimports=HIDDEN.get(tool, []),
+         hookspath=[],
+         hooksconfig={},
+         runtime_hooks=[],
+@@ -73,7 +82,7 @@ for a, tool in zip(analyses, TOOLS):
+         exclude_binaries=True,
+         name=tool,
+         icon=ICON,
+-        console=False,
++        console=tool in CONSOLE_TOOLS,
+         upx=False,
+     )
+     exes.append(exe)
+diff --git a/packaging/linux/build_appimage.sh b/packaging/linux/build_appimage.sh
+index 62c0b56..79f3d8a 100644
+--- a/packaging/linux/build_appimage.sh
++++ b/packaging/linux/build_appimage.sh
+@@ -36,6 +36,7 @@ VERSION="$(sed -n 's/^CURRENT_VERSION = "\([^"]*\)"/\1/p' \
+ 
+ RUNTIME_FILES="eql_launcher.py eql_friend_overlay.py eql_dps_meter.py
+ eql_session_report.py eql_atlas.py eql_atlas_map.py eql_quest.py
++eql_headless.py eql_quest_cli.py
+ eql_overlay_common.py eql_combat_tracker.py eql_spell_db.py
+ eql_verified_spells.py eql_update_check.py eql_atlas_baseline.json.gz
+ eql_quest_db.json.gz icon.png LICENSE README.md RELEASE_NOTES.md"
+diff --git a/packaging/linux/build_linux_packages.py b/packaging/linux/build_linux_packages.py
+index 4419f5c..309cfb5 100644
+--- a/packaging/linux/build_linux_packages.py
++++ b/packaging/linux/build_linux_packages.py
+@@ -39,7 +39,8 @@ OUT = os.path.join(ROOT, "Output")
+ RUNTIME_FILES = [
+     "eql_launcher.py", "eql_friend_overlay.py", "eql_dps_meter.py",
+     "eql_session_report.py", "eql_atlas.py", "eql_atlas_map.py",
+-    "eql_quest.py", "eql_overlay_common.py", "eql_combat_tracker.py",
++    "eql_quest.py", "eql_headless.py", "eql_quest_cli.py",
++    "eql_overlay_common.py", "eql_combat_tracker.py",
+     "eql_spell_db.py", "eql_verified_spells.py", "eql_update_check.py",
+     "eql_atlas_baseline.json.gz", "eql_quest_db.json.gz",
+     "icon.png", "LICENSE", "README.md", "RELEASE_NOTES.md",
+diff --git a/tools/compare_headless_gui.sh b/tools/compare_headless_gui.sh
+new file mode 100755
+index 0000000..c86a442
+--- /dev/null
++++ b/tools/compare_headless_gui.sh
+@@ -0,0 +1,47 @@
++#!/usr/bin/env bash
++# usage: compare_headless_gui.sh <source-log> <lines-to-append> <run-seconds>
++set -euo pipefail
++
++FORK="$(cd "$(dirname "$0")/.." && pwd)"
++SRC="${1:-$FORK/reallog.txt}"
++TAIL_LINES="${2:-6000}"
++RUN_S="${3:-40}"
++PY=/usr/bin/python3
++WORK=/tmp/eqlhl
++UPSTREAM="${UPSTREAM:-/home/dorsk/Documents/eql/tmp/upstream}"
++
++rm -rf "$WORK"; mkdir -p "$WORK"/{gui,headless,logs}
++cp "$UPSTREAM"/*.py "$UPSTREAM"/*.json.gz "$WORK/gui/" 2>/dev/null || true
++cp "$FORK"/*.py "$FORK"/*.json.gz "$WORK/headless/" 2>/dev/null || true
++
++seed() { head -100 "$SRC" > "$1"; }
++LOG_G="$WORK/logs/eqlog_Guitest_erudin.txt"
++LOG_H="$WORK/logs/eqlog_Guitest_erudin.txt"   # same file, both tail it
++seed "$LOG_G"
++
++echo "== launching GUI overlay (Xvfb) and headless runner on $LOG_G =="
++xvfb-run -a -s "-screen 0 1280x1024x24" \
++  "$PY" "$WORK/gui/eql_dps_meter.py" "$LOG_G" >"$WORK/gui.out" 2>&1 &
++GUI_PID=$!
++"$PY" "$WORK/headless/eql_dps_meter.py" --headless "$LOG_G" \
++  >"$WORK/headless.out" 2>&1 &
++HL_PID=$!
++
++sleep 4
++echo "== appending lines 101..$TAIL_LINES =="
++sed -n "101,${TAIL_LINES}p" "$SRC" >> "$LOG_G"
++sleep "$RUN_S"
++
++echo "== stopping (SIGTERM: headless flushes, GUI relies on its 15s autosave) =="
++kill -TERM "$HL_PID" 2>/dev/null || true
++sleep 2
++pkill -TERM -P "$GUI_PID" 2>/dev/null || true
++kill -TERM "$GUI_PID" 2>/dev/null || true
++wait "$HL_PID" 2>/dev/null || true
++sleep 1
++
++echo; echo "== GUI  =="; cat "$WORK"/gui/eql_alltime_*.json
++echo; echo "== HEADLESS =="; cat "$WORK"/headless/eql_alltime_*.json
++echo; echo "== DIFF (exact) =="
++diff <(cat "$WORK"/gui/eql_alltime_*.json) \
++     <(cat "$WORK"/headless/eql_alltime_*.json) && echo "IDENTICAL"
+diff --git a/tools/compare_live_feed.sh b/tools/compare_live_feed.sh
+new file mode 100644
+index 0000000..65d1502
+--- /dev/null
++++ b/tools/compare_live_feed.sh
+@@ -0,0 +1,24 @@
++# usage: compare_live_feed.sh <source-log> <chunk-lines> <chunks> <sleep-s>
++set -euo pipefail
++FORK="$(cd "$(dirname "$0")/.." && pwd)"
++SRC="${1:-$FORK/reallog.txt}"; CH="${2:-150}"; N="${3:-40}"; SL="${4:-1}"
++PY=/usr/bin/python3; WORK=/tmp/eqlhl2
++UPSTREAM="${UPSTREAM:-/home/dorsk/Documents/eql/tmp/upstream}"
++rm -rf "$WORK"; mkdir -p "$WORK"/{gui,headless,logs}
++cp "$UPSTREAM"/*.py "$UPSTREAM"/*.json.gz "$WORK/gui/" 2>/dev/null || true
++cp "$FORK"/*.py "$FORK"/*.json.gz "$WORK/headless/" 2>/dev/null || true
++LOG="$WORK/logs/eqlog_Livetest_erudin.txt"; head -50 "$SRC" > "$LOG"
++xvfb-run -a -s "-screen 0 1280x1024x24" "$PY" "$WORK/gui/eql_dps_meter.py" "$LOG" >"$WORK/gui.out" 2>&1 & GUI_PID=$!
++"$PY" "$WORK/headless/eql_dps_meter.py" --headless "$LOG" >"$WORK/hl.out" 2>&1 & HL_PID=$!
++sleep 4
++line=51
++for i in $(seq 1 "$N"); do
++  sed -n "${line},$((line+CH-1))p" "$SRC" >> "$LOG"; line=$((line+CH)); sleep "$SL"
++done
++sleep 3
++kill -TERM "$HL_PID" 2>/dev/null || true; sleep 2
++pkill -TERM -P "$GUI_PID" 2>/dev/null || true; kill -TERM "$GUI_PID" 2>/dev/null || true
++wait "$HL_PID" 2>/dev/null || true; sleep 1
++echo "== GUI =="; cat "$WORK"/gui/eql_alltime_*.json
++echo "== HEADLESS =="; cat "$WORK"/headless/eql_alltime_*.json
++echo "== DIFF =="; diff <(cat "$WORK"/gui/eql_alltime_*.json) <(cat "$WORK"/headless/eql_alltime_*.json) && echo IDENTICAL

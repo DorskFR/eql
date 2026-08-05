@@ -40,7 +40,7 @@ pub async fn run(config: &Config, args: &[String]) -> Result<(), InstallError> {
         .build()
         .map_err(InstallError::Client)?;
 
-    let url = tools::release_api_url(&version);
+    let url = tools::release_api_url(settings.repo(), &version);
     let response = client
         .get(&url)
         .send()
@@ -247,6 +247,34 @@ mod tests {
     fn an_unrelated_asset_is_not_picked() {
         let assets = vec![asset("neon_hud.rar"), asset("EQL-Log-Reader-Setup.exe")];
         assert!(pick_asset(&assets, "eql-log-reader-2.0.1-linux.tar.gz").is_none());
+    }
+
+    /// Our own release carries the daemon beside the log reader, and the
+    /// unpinned `latest` has no version to interpolate into the tarball name.
+    #[test]
+    fn our_release_assets_do_not_shadow_the_log_reader() {
+        let assets = vec![
+            asset("eqld-windows-x86_64.exe"),
+            asset("eqld-macos-aarch64"),
+            asset("EQL-Log-Reader-Setup.exe"),
+            asset("eql-log-reader-2.0.1-linux.tar.gz"),
+        ];
+        assert_eq!(
+            pick_asset(&assets, "EQL-Log-Reader-Setup.exe")
+                .unwrap()
+                .name,
+            "EQL-Log-Reader-Setup.exe"
+        );
+        let unpinned = crate::tools::asset_name("latest")
+            .and_then(|wanted| pick_asset(&assets, &wanted))
+            .map(|asset| asset.name.as_str());
+        if cfg!(windows) {
+            assert_eq!(unpinned, Some("EQL-Log-Reader-Setup.exe"));
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(unpinned, Some("eql-log-reader-2.0.1-linux.tar.gz"));
+        } else {
+            assert_eq!(unpinned, None, "no package exists for this platform");
+        }
     }
 
     #[test]

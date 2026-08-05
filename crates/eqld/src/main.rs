@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         harvest = %harvest,
         overlays = ?daemon.overlays(),
         hidden = ?daemon.hidden_overlays(),
+        headless = ?daemon.headless_overlays(),
         config = %path.display(),
         "eqld starting"
     );

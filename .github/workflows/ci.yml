@@ -26,6 +26,14 @@ jobs:
 
       - run: cargo test --workspace
 
+  log-reader-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply the vendored patch to a fresh upstream checkout
+        run: vendor/eql-log-reader/apply.sh "$RUNNER_TEMP/eql-log-reader"
+
   web:
     runs-on: ubuntu-latest
     defaults:

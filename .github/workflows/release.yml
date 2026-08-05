@@ -37,6 +37,54 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  log-reader:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check upstream out at the pinned commit and patch it
+        run: vendor/eql-log-reader/apply.sh "$RUNNER_TEMP/eql-log-reader"
+
+      - name: Build the Windows suite and its installer
+        if: runner.os == 'Windows'
+        working-directory: ${{ runner.temp }}/eql-log-reader
+        run: |
+          python -m pip install --upgrade pyinstaller
+          python -m PyInstaller --noconfirm --clean eql_suite.spec
+          cp icon.png LICENSE README.md "dist/EQL Log Reader/"
+          choco install innosetup --no-progress -y
+          iscc=$(find "/c/Program Files (x86)" "/c/Program Files" \
+            -maxdepth 2 -name ISCC.exe -print -quit)
+          "$iscc" installer.iss
+
+      - name: Build the Linux tarball
+        if: runner.os == 'Linux'
+        working-directory: ${{ runner.temp }}/eql-log-reader
+        run: python packaging/linux/build_linux_packages.py
+
+      - name: Upload the log reader to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          BUILT: ${{ runner.temp }}/eql-log-reader/Output
+        run: |
+          ls -l "$BUILT"
+          gh release create "$TAG" --generate-notes || true
+          gh release upload "$TAG" "$BUILT"/* --clobber
+
   daemon:
     permissions:
       contents: write
