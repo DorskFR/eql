@@ -1,5 +1,6 @@
 mod app;
 mod scrape;
+mod skin;
 mod stats;
 mod wiki;
 
