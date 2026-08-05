@@ -1,0 +1,27 @@
+{{Classic Era}}
+
+<onlyinclude>{{Itempage
+|notes       = {{Item Lore | 'Spirit Reaver' }}
+|itemname    = Spirit Reaver
+|lucy_img_ID = 576
+|statsblock  = 
+MAGIC ITEM  LORE ITEM  <br>
+Slot: PRIMARY<br>
+Skill: 1H Slashing  Atk Delay: 27<br>
+DMG: 13 <br>
+Effect: [[Lifespike]] (Combat, Casting Time: Instant) at Level 20<br>
+WT: 0.4  Size: MEDIUM<br>
+Class: SHD<br>
+Race: ALL<br>
+|dropsfrom = 
+
+[[Stonebrunt Mountains]]
+
+* [[Jelquar the Soulslayer]]
+
+}}</onlyinclude>
+
+[[Category:Shadow Knight Equipment]]
+[[Category:Primary]]
+[[Category:1H Slashing]]
+[[Category:Stonebrunt Mountains]]

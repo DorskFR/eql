@@ -1,0 +1,61 @@
+{{Classic Era}}
+
+<onlyinclude>{{Itempage
+|notes       = Purchased from the '''[[Marfen Binkdirple]] (Gnome vendor)''' in [[Solusek's Eye]] for varying prices. *See discussion
+
+{{{!}} class="wikitable eoTable3"
+! Cost
+! Character 
+! Markup
+{{!}}-
+{{!}} 5301p
+{{!}} [[Karana]] [[Halfling]] [[druid]] 59 CHA / Amiably
+{{!}} +5.2%
+{{!}}-
+{{!}} 5294p
+{{!}} [[Cazic-Thule]] [[Iksar]] [[Monk]] with 61 CHA and sneaking (Indifferent faction)
+{{!}} +5%
+{{!}}-
+{{!}} 5265p
+{{!}} [[Tunare]] [[Wood Elf]] [[Druid]] with 70 CHA and kindly
+{{!}} +4.4%
+{{!}}-
+{{!}} 5250p
+{{!}} [[Dwarf]] with 96 CHA
+{{!}} +4%
+{{!}}-
+{{!}} 5184p
+{{!}} [[Agnostic]] [[Erudite]] [[Wizard]] with 84CHA and amiable faction
+{{!}} +2.8%
+{{!}}-
+{{!}} 5068p
+{{!}} [[Agnostic]] [[Human]] [[Monk]] with 100CHA and amiable faction
+{{!}} +0.6%
+{{!}}-
+{{!}} 5040p
+{{!}} [[Agnostic]] [[Gnome]] with 193 CHA and [[Benevolence]]
+{{!}} +0%
+{{!}}-
+{{!}} 5040p
+{{!}} [[Cazic-Thule]] [[Iksar]] [[Shaman]] with Bear Form, 133* Charisma, and Apprehensive faction
+{{!}} +0%
+{{!}}-
+{{!}} 5039.999p
+{{!}} Minimum Price (at 104 CHA with Indifferent faction. Approx 129 CHA at Apprehensive)
+{{!}} +0%
+{{!}}}
+|itemname    = Bag of the Tinkerers
+|lucy_img_ID = 557
+|statsblock  = 
+WT: 1.0  Weight Reduction: 100%<br>
+Capacity: 10  Size Capacity: GIANT<br>
+|soldby = 
+
+{{ItemWhereTable|
+{{ItemWhereRow   | [[Solusek's Eye]]                 | [[Marfen Binkdirple]]         | Outside Castle Entrance | (-306, -1072) }}
+}}
+}}</onlyinclude>
+[[Category:Containers]]
+[[Category:Inventory Items]]
+[[Category:Weight Reduction]]
+[[Category:Vendor Sold]]
