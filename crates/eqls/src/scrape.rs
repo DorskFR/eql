@@ -1,6 +1,6 @@
 use crate::wiki::{parse_item, ItemStats};
 use serde::Deserialize;
-use sqlx::{types::Json as SqlJson, PgPool};
+use sqlx::{types::Json as SqlJson, PgPool, Row};
 use std::time::Duration;
 
 const API: &str = "https://eqlwiki.com/api.php";
@@ -208,6 +208,40 @@ pub async fn upsert(pool: &PgPool, stats: &ItemStats, wikitext: &str) -> Result<
     .bind(wikitext)
     .fetch_one(pool)
     .await
+}
+
+/// Lets a parser change land without re-fetching every wiki page.
+pub async fn reparse(pool: &PgPool) -> Result<Summary, ScrapeError> {
+    let rows = sqlx::query("select id, name, wikitext from items order by id")
+        .fetch_all(pool)
+        .await?;
+
+    let mut summary = Summary::default();
+    for row in &rows {
+        summary.fetched += 1;
+        let id: i64 = row.try_get("id")?;
+        let name: String = row.try_get("name")?;
+        let wikitext: String = row.try_get("wikitext")?;
+        let Some(stats) = parse_item(&name, &wikitext) else {
+            summary.skipped += 1;
+            continue;
+        };
+        summary.unparsed_fields += stats.unparsed.len();
+        sqlx::query("update items set stats = $2 where id = $1")
+            .bind(id)
+            .bind(SqlJson(&stats))
+            .execute(pool)
+            .await?;
+        summary.upserted += 1;
+    }
+
+    tracing::info!(
+        items = summary.fetched,
+        rewritten = summary.upserted,
+        skipped = summary.skipped,
+        "reparse complete"
+    );
+    Ok(summary)
 }
 
 async fn fetch_category_batch(

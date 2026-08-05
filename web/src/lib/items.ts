@@ -4,6 +4,10 @@ export function itemPath(name: string): string {
 	return `/i/${encodeURIComponent(name)}`;
 }
 
+export function iconUrl(stats: ItemStats | undefined): string | null {
+	return stats?.icon ? `/api/v1/icons/${stats.icon}.png` : null;
+}
+
 export function damageDelay(stats: ItemStats | undefined): string {
 	if (!stats?.damage && !stats?.delay) return '';
 	return `${stats.damage ?? '?'}/${stats.delay ?? '?'}`;

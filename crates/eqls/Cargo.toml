@@ -8,6 +8,7 @@ authors.workspace = true
 [dependencies]
 eql-core = { path = "../eql-core" }
 axum = "0.8"
+image = { version = "0.25", default-features = false, features = ["dds", "png"] }
 regex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

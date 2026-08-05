@@ -1,4 +1,5 @@
 mod app;
+mod icons;
 mod scrape;
 mod skin;
 mod stats;
@@ -20,6 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("scrape") => scrape_command(&args[1..]).await,
+        Some("reparse") => reparse_command().await,
         Some(other) => Err(format!("unknown subcommand {other:?}").into()),
         None => serve().await,
     }
@@ -33,6 +35,14 @@ async fn scrape_command(args: &[String]) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+async fn reparse_command() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = connect()?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    scrape::reparse(&pool).await?;
+    pool.close().await;
+    Ok(())
+}
+
 async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let machine_token: Arc<str> = Arc::from(std::env::var("EQLS_MACHINE_TOKEN")?);
     let listen_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
@@ -41,10 +51,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(migrate_forever(pool.clone()));
 
-    let state = AppState {
-        pool,
-        machine_token,
-    };
+    let state = AppState::new(pool, machine_token);
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     tracing::info!(addr = %listen_addr, web_dist = %web_dist.display(), "eqls listening");
     axum::serve(listener, app::router(state, web_dist)).await?;

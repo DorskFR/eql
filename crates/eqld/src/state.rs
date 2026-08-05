@@ -9,6 +9,8 @@ pub struct State {
     pub logs: BTreeMap<String, LogState>,
     #[serde(default)]
     pub harvest: BTreeMap<String, FileState>,
+    #[serde(default)]
+    pub icons: BTreeMap<String, FileState>,
 }
 
 /// Byte offset already shipped for a tailed log; a file first seen at offset

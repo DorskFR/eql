@@ -14,13 +14,15 @@
 		Text,
 		Timestamp
 	} from '@dorsk/tsumikit';
-	import { ATTRIBUTES, damageDelay, flags, pairs, ratio, RESISTS } from '$lib/items';
+	import { ATTRIBUTES, damageDelay, flags, iconUrl, pairs, ratio, RESISTS } from '$lib/items';
 	import { useItem } from '$lib/queries';
 
 	const key = $derived(page.params.name ?? '');
 	const item = useItem(() => key);
 
 	const stats = $derived(item.data?.stats);
+	const icon = $derived(iconUrl(stats));
+	let brokenIcon = $state('');
 	const attributes = $derived(stats ? pairs(stats, ATTRIBUTES) : []);
 	const resists = $derived(stats ? pairs(stats, RESISTS) : []);
 </script>
@@ -29,6 +31,16 @@
 	<Cluster justify="space-between">
 		<Cluster gap="var(--sp-3)">
 			<Button href="/" variant="ghost" size="sm">Back</Button>
+			{#if icon && brokenIcon !== icon}
+				<img
+					class="item-icon"
+					src={icon}
+					alt=""
+					width="40"
+					height="40"
+					onerror={() => (brokenIcon = icon)}
+				/>
+			{/if}
 			<Heading level={2}>{item.data?.name ?? key}</Heading>
 		</Cluster>
 		{#if item.data}
@@ -186,3 +198,11 @@
 		</Card>
 	{/if}
 </Stack>
+
+<style>
+	.item-icon {
+		width: 2.5rem;
+		height: 2.5rem;
+		image-rendering: pixelated;
+	}
+</style>

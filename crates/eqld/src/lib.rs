@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod harvest;
 #[cfg(windows)]
 pub mod hidden;
+pub mod icons;
 pub mod install;
 pub mod logs;
 pub mod overlays;
