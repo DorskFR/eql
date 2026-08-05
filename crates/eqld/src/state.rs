@@ -5,6 +5,15 @@ use std::{collections::BTreeMap, path::Path};
 pub struct State {
     #[serde(default)]
     pub files: BTreeMap<String, FileState>,
+    #[serde(default)]
+    pub logs: BTreeMap<String, LogState>,
+}
+
+/// Byte offset already shipped for a tailed log; a file first seen at offset
+/// `len` is never back-filled with history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogState {
+    pub offset: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +120,21 @@ mod tests {
             .hash = "def".into();
         updated.save(&path).unwrap();
         assert_eq!(State::load(&path).unwrap(), updated);
+    }
+
+    #[test]
+    fn log_offsets_round_trip_and_predate_state_files_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = sample();
+        state
+            .logs
+            .insert("eqlog_Dorsk_erudin.txt".into(), LogState { offset: 4096 });
+        state.save(&path).unwrap();
+        assert_eq!(State::load(&path).unwrap(), state);
+
+        std::fs::write(&path, r#"{"files":{}}"#).unwrap();
+        assert!(State::load(&path).unwrap().logs.is_empty());
     }
 
     #[test]

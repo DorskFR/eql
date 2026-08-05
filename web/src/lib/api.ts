@@ -141,6 +141,27 @@ export interface StatsView {
 	equipped: InventoryEntry[];
 }
 
+export type LogEventKind = 'loot' | 'level' | 'zone' | 'death' | 'location' | 'skill';
+
+export interface LogEventPayload {
+	item?: string;
+	level?: number;
+	zone?: string;
+	killer?: string;
+	skill?: string;
+	value?: number;
+	y?: number;
+	x?: number;
+	z?: number;
+}
+
+export interface LogEvent {
+	id: number;
+	at: string;
+	kind: LogEventKind | string;
+	payload: LogEventPayload;
+}
+
 export class ApiError extends Error {
 	status: number;
 	constructor(status: number, message: string) {
@@ -177,6 +198,13 @@ export const endpoints = {
 		get<StatsView>(
 			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/stats`
 		),
+	events: (server: string, name: string, limit: number, before?: string) => {
+		const query = new URLSearchParams({ limit: String(limit) });
+		if (before) query.set('before', before);
+		return get<LogEvent[]>(
+			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/events?${query}`
+		);
+	},
 	itemSearch: (query: string) =>
 		get<ItemRecord[]>(`/api/v1/items?q=${encodeURIComponent(query)}`),
 	item: (key: string) => get<ItemRecord>(`/api/v1/items/${encodeURIComponent(key)}`)

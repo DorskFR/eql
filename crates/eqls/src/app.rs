@@ -10,7 +10,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use eql_core::{api::InventoryUpload, inventory::InventoryEntry};
+use eql_core::{
+    api::{InventoryUpload, LogBatch, LogEventKind},
+    inventory::InventoryEntry,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{types::Json as SqlJson, PgPool, Row};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -26,10 +29,15 @@ pub struct AppState {
 pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     let ingest = Router::new()
         .route("/api/v1/inventory", post(ingest))
+        .route("/api/v1/events", post(ingest_events))
         .layer(from_fn_with_state(state.clone(), require_machine_token));
 
     let api = Router::new()
         .route("/api/v1/characters", get(list_characters))
+        .route(
+            "/api/v1/characters/{server}/{name}/events",
+            get(list_events),
+        )
         .route(
             "/api/v1/characters/{server}/{name}/inventory",
             get(latest_inventory),
@@ -124,15 +132,7 @@ async fn ingest(
     };
 
     let mut tx = state.pool.begin().await?;
-    let character_id: i64 = sqlx::query_scalar(
-        "insert into characters (name, server) values ($1, $2) \
-         on conflict (name, server) do update set name = excluded.name \
-         returning id",
-    )
-    .bind(upload.character.trim())
-    .bind(upload.server.trim())
-    .fetch_one(&mut *tx)
-    .await?;
+    let character_id = upsert_character(&mut tx, &upload.character, &upload.server).await?;
     let snapshot_id: i64 = sqlx::query_scalar(
         "insert into inventory_snapshots (character_id, captured_at, entries, raw) \
          values ($1, $2, $3, $4) returning id",
@@ -160,6 +160,153 @@ async fn ingest(
             entries: upload.entries.len(),
             captured_at,
         }),
+    ))
+}
+
+async fn upsert_character(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    name: &str,
+    server: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "insert into characters (name, server) values ($1, $2) \
+         on conflict (name, server) do update set name = excluded.name \
+         returning id",
+    )
+    .bind(name.trim())
+    .bind(server.trim())
+    .fetch_one(&mut **tx)
+    .await
+}
+
+#[derive(Serialize)]
+struct EventsAccepted {
+    character_id: i64,
+    events: usize,
+}
+
+/// The daemon replays a batch it never saw accepted, so duplicates are expected
+/// and harmless: rows are append-only and the UI reads them newest-first.
+async fn ingest_events(
+    State(state): State<AppState>,
+    Json(batch): Json<LogBatch>,
+) -> Result<(StatusCode, Json<EventsAccepted>), AppError> {
+    if batch.character.trim().is_empty() || batch.server.trim().is_empty() {
+        return Err(AppError::EmptyIdentity);
+    }
+    if batch.events.is_empty() {
+        return Err(AppError::EmptyEvents);
+    }
+
+    let mut ats = Vec::with_capacity(batch.events.len());
+    let mut kinds = Vec::with_capacity(batch.events.len());
+    let mut payloads = Vec::with_capacity(batch.events.len());
+    for event in &batch.events {
+        ats.push(
+            OffsetDateTime::from_unix_timestamp(event.at)
+                .map_err(|_| AppError::BadCapturedAt(event.at))?,
+        );
+        kinds.push(event.kind.tag().to_string());
+        payloads.push(payload_of(&event.kind));
+    }
+
+    let mut tx = state.pool.begin().await?;
+    let character_id = upsert_character(&mut tx, &batch.character, &batch.server).await?;
+    sqlx::query(
+        "insert into log_events (character_id, at, kind, payload) \
+         select $1, * from unnest($2::timestamptz[], $3::text[], $4::jsonb[])",
+    )
+    .bind(character_id)
+    .bind(&ats)
+    .bind(&kinds)
+    .bind(&payloads)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    tracing::info!(
+        character = %batch.character,
+        server = %batch.server,
+        events = batch.events.len(),
+        "stored log events"
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(EventsAccepted {
+            character_id,
+            events: batch.events.len(),
+        }),
+    ))
+}
+
+/// The kind tag rides in its own column, so it is stripped from the payload.
+fn payload_of(kind: &LogEventKind) -> serde_json::Value {
+    let mut value = serde_json::to_value(kind).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.remove("kind");
+    }
+    value
+}
+
+#[derive(Deserialize)]
+struct EventPage {
+    limit: Option<i64>,
+    before: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EventView {
+    id: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    at: OffsetDateTime,
+    kind: String,
+    payload: serde_json::Value,
+}
+
+async fn list_events(
+    State(state): State<AppState>,
+    Path((server, name)): Path<(String, String)>,
+    Query(page): Query<EventPage>,
+) -> Result<Json<Vec<EventView>>, AppError> {
+    let limit = page.limit.unwrap_or(100).clamp(1, 500);
+    let before = page
+        .before
+        .as_deref()
+        .filter(|cursor| !cursor.is_empty())
+        .map(|cursor| {
+            OffsetDateTime::parse(cursor, &time::format_description::well_known::Rfc3339)
+                .map_err(|_| AppError::BadCursor(cursor.to_string()))
+        })
+        .transpose()?;
+
+    let rows = sqlx::query(
+        "select e.id, e.at, e.kind, e.payload \
+         from log_events e \
+         join characters c on c.id = e.character_id \
+         where lower(c.server) = lower($1) and lower(c.name) = lower($2) \
+           and ($3::timestamptz is null or e.at < $3) \
+         order by e.at desc, e.id desc \
+         limit $4",
+    )
+    .bind(&server)
+    .bind(&name)
+    .bind(before)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                let payload: SqlJson<serde_json::Value> = row.try_get("payload")?;
+                Ok(EventView {
+                    id: row.try_get("id")?,
+                    at: row.try_get("at")?,
+                    kind: row.try_get("kind")?,
+                    payload: payload.0,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
     ))
 }
 
@@ -422,6 +569,10 @@ enum AppError {
     EmptyIdentity,
     #[error("inventory upload must contain at least one entry")]
     EmptyEntries,
+    #[error("log batch must contain at least one event")]
+    EmptyEvents,
+    #[error("before={0} is not an rfc3339 timestamp")]
+    BadCursor(String),
     #[error("captured_at {0} is not a valid unix timestamp")]
     BadCapturedAt(i64),
     #[error("no inventory snapshot for that character")]
@@ -434,9 +585,11 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match self {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
-            AppError::EmptyIdentity | AppError::EmptyEntries | AppError::BadCapturedAt(_) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            AppError::EmptyIdentity
+            | AppError::EmptyEntries
+            | AppError::EmptyEvents
+            | AppError::BadCapturedAt(_)
+            | AppError::BadCursor(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Database(ref err) => {
                 tracing::error!(%err, "database error");
@@ -538,6 +691,171 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(status_of(request).await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    const BATCH: &str = r#"{
+        "character": "Dorsk",
+        "server": "erudin",
+        "events": [
+            {"at": 1784668523, "kind": "zone", "zone": "East Commonlands"},
+            {"at": 1784668524, "kind": "loot", "item": "Rusty Dagger"},
+            {"at": 1784668525, "kind": "death"}
+        ]
+    }"#;
+
+    fn post_events(token: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/events")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn events_reject_a_missing_or_wrong_token() {
+        let anonymous = Request::builder()
+            .method("POST")
+            .uri("/api/v1/events")
+            .header("content-type", "application/json")
+            .body(Body::from(BATCH))
+            .unwrap();
+        assert_eq!(status_of(anonymous).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status_of(post_events("wrong", "not json at all")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn events_reject_empty_batches_before_touching_the_database() {
+        let empty = r#"{"character":"Dorsk","server":"erudin","events":[]}"#;
+        assert_eq!(
+            status_of(post_events("s3cret", empty)).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let nameless = r#"{"character":" ","server":"erudin","events":[{"at":1,"kind":"death"}]}"#;
+        assert_eq!(
+            status_of(post_events("s3cret", nameless)).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_cursor_is_rejected() {
+        let request = Request::builder()
+            .uri("/api/v1/characters/erudin/Dorsk/events?before=yesterday")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(request).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn payloads_drop_the_kind_tag_they_are_stored_beside() {
+        let payload = payload_of(&LogEventKind::Loot {
+            item: "Rusty Dagger".into(),
+        });
+        assert_eq!(payload, serde_json::json!({ "item": "Rusty Dagger" }));
+        assert_eq!(
+            payload_of(&LogEventKind::Death { killer: None }),
+            serde_json::json!({})
+        );
+    }
+
+    /// Runs against a throwaway database when `EQLS_TEST_DATABASE_URL` is set;
+    /// the suite stays green on machines without one.
+    async fn live_app() -> Option<(Router, PgPool)> {
+        let url = std::env::var("EQLS_TEST_DATABASE_URL").ok()?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&url)
+            .await
+            .expect("EQLS_TEST_DATABASE_URL is set but unreachable");
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query("truncate characters restart identity cascade")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let app = router(
+            AppState {
+                pool: pool.clone(),
+                machine_token: Arc::from("s3cret"),
+            },
+            PathBuf::from("web/build"),
+        );
+        Some((app, pool))
+    }
+
+    async fn json_of(app: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn events_upsert_the_character_and_page_newest_first() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+
+        let (status, accepted) = json_of(&app, post_events("s3cret", BATCH)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(accepted["events"], 3);
+        let character_id = accepted["character_id"].as_i64().unwrap();
+
+        let page = |query: &str| {
+            Request::builder()
+                .uri(format!("/api/v1/characters/erudin/dorsk/events?{query}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, events) = json_of(&app, page("limit=10")).await;
+        assert_eq!(status, StatusCode::OK);
+        let events = events.as_array().unwrap().clone();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["kind"], "death");
+        assert_eq!(events[0]["at"], "2026-07-21T21:15:25Z");
+        assert_eq!(events[0]["payload"], serde_json::json!({}));
+        assert_eq!(events[1]["kind"], "loot");
+        assert_eq!(events[1]["payload"]["item"], "Rusty Dagger");
+        assert_eq!(events[2]["kind"], "zone");
+        assert_eq!(events[2]["payload"]["zone"], "East Commonlands");
+
+        let (_, first_page) = json_of(&app, page("limit=1")).await;
+        assert_eq!(first_page.as_array().unwrap().len(), 1);
+
+        let (_, older) = json_of(&app, page("limit=10&before=2026-07-21T21:15:25Z")).await;
+        let older = older.as_array().unwrap().clone();
+        assert_eq!(older.len(), 2);
+        assert_eq!(older[0]["kind"], "loot");
+        assert!(older
+            .iter()
+            .all(|event| event["at"].as_str().unwrap() < "2026-07-21T21:15:25Z"));
+
+        let (status, again) = json_of(&app, post_events("s3cret", BATCH)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(again["character_id"].as_i64().unwrap(), character_id);
+        let characters: i64 = sqlx::query_scalar("select count(*) from characters")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(characters, 1);
+        let stored: i64 = sqlx::query_scalar("select count(*) from log_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 6);
+
+        let (_, unknown) = json_of(&app, {
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Nobody/events")
+                .body(Body::empty())
+                .unwrap()
+        })
+        .await;
+        assert_eq!(unknown.as_array().unwrap().len(), 0);
     }
 
     #[test]

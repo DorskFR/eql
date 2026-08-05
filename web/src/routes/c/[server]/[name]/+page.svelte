@@ -19,7 +19,8 @@
 		type Column,
 		type TabItem
 	} from '@dorsk/tsumikit';
-	import type { InventoryEntry, ItemClasses, WeaponSummary } from '$lib/api';
+	import type { InventoryEntry, ItemClasses, LogEvent, WeaponSummary } from '$lib/api';
+	import { describeEvent, eventTone } from '$lib/events';
 	import { filled, groupEntries } from '$lib/inventory';
 	import {
 		ATTRIBUTES,
@@ -32,7 +33,7 @@
 		weaponDamageDelay,
 		weaponRatio
 	} from '$lib/items';
-	import { useInventory, useStats } from '$lib/queries';
+	import { useEvents, useInventory, useStats } from '$lib/queries';
 
 	const server = $derived(page.params.server ?? '');
 	const name = $derived(page.params.name ?? '');
@@ -46,6 +47,19 @@
 		() => server,
 		() => name
 	);
+
+	const events = useEvents(
+		() => server,
+		() => name
+	);
+
+	const eventRows = $derived(events.data?.pages.flat() ?? []);
+
+	const eventColumns: Column<LogEvent>[] = [
+		{ key: 'at', label: 'When' },
+		{ key: 'kind', label: 'Event' },
+		{ key: 'detail', label: 'Detail', get: describeEvent }
+	];
 
 	const stats = $derived(gear.data?.stats);
 	const attributes = $derived(stats ? gearPairs(stats, ATTRIBUTES) : []);
@@ -113,7 +127,8 @@
 	const tabs: TabItem[] = $derived([
 		{ id: 'stats', label: 'Stats', icon: 'star' },
 		{ id: 'general', label: `General (${general.length})`, icon: 'archive' },
-		{ id: 'bank', label: `Bank (${bank.length})`, icon: 'lock' }
+		{ id: 'bank', label: `Bank (${bank.length})`, icon: 'lock' },
+		{ id: 'events', label: 'Events', icon: 'clock' }
 	]);
 
 	let tab = $state('stats');
@@ -181,6 +196,8 @@
 			{#snippet panel(id)}
 				{#if id === 'stats'}
 					{@render statsPanel()}
+				{:else if id === 'events'}
+					{@render eventsPanel()}
 				{:else}
 					<Card padding="none">
 						{#if id === 'general'}
@@ -330,6 +347,66 @@
 			{/if}
 		</Stack>
 	{/if}
+{/snippet}
+
+{#snippet eventsPanel()}
+	{#if events.isPending}
+		<Card>
+			<Cluster gap="var(--sp-2)">
+				<Spinner />
+				<Text tone="muted">Loading events…</Text>
+			</Cluster>
+		</Card>
+	{:else if events.isError}
+		<EmptyState
+			title="No event stream"
+			description={events.error.message}
+			icon="alert-circle"
+			tone="warn"
+			actionLabel="Retry"
+			onAction={() => events.refetch()}
+		/>
+	{:else if eventRows.length === 0}
+		<EmptyState
+			title="No events yet"
+			description="Turn logging on in game with /log on — the daemon ships new lines as they are written."
+			icon="clock"
+		/>
+	{:else}
+		<Stack gap="var(--sp-2)">
+			<Card padding="none">
+				<DataTable
+					columns={eventColumns}
+					rows={eventRows}
+					rowKey={(event) => event.id}
+					cellSnippets={{ at: eventWhen, kind: eventKind }}
+					empty="No events yet."
+					stickyHeader
+				/>
+			</Card>
+			<Cluster justify="space-between">
+				<Text variant="caption" tone="faint">{eventRows.length} events</Text>
+				{#if events.hasNextPage}
+					<Button
+						variant="ghost"
+						size="sm"
+						loading={events.isFetchingNextPage}
+						onclick={() => events.fetchNextPage()}
+					>
+						Load older
+					</Button>
+				{/if}
+			</Cluster>
+		</Stack>
+	{/if}
+{/snippet}
+
+{#snippet eventWhen(event: LogEvent)}
+	<Timestamp value={event.at} mode="datetime" />
+{/snippet}
+
+{#snippet eventKind(event: LogEvent)}
+	<Badge tone={eventTone(event)} size="sm">{event.kind}</Badge>
 {/snippet}
 
 {#snippet itemName(entry: InventoryEntry)}
