@@ -18,13 +18,13 @@ export function isBank(entry: InventoryEntry): boolean {
 	return entry.location.startsWith('Bank') || entry.location.startsWith('SharedBank');
 }
 
-export interface InventoryGroups {
-	equipped: InventoryEntry[];
-	general: InventoryEntry[];
-	bank: InventoryEntry[];
+export interface InventoryGroups<T extends InventoryEntry = InventoryEntry> {
+	equipped: T[];
+	general: T[];
+	bank: T[];
 }
 
-export function groupEntries(entries: InventoryEntry[]): InventoryGroups {
+export function groupEntries<T extends InventoryEntry>(entries: T[]): InventoryGroups<T> {
 	return {
 		equipped: entries.filter(isEquipped),
 		general: entries.filter(isGeneral),
@@ -32,6 +32,6 @@ export function groupEntries(entries: InventoryEntry[]): InventoryGroups {
 	};
 }
 
-export function filled(entries: InventoryEntry[]): InventoryEntry[] {
+export function filled<T extends InventoryEntry>(entries: T[]): T[] {
 	return entries.filter((entry) => entry.name !== 'Empty');
 }
