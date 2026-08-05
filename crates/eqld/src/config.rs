@@ -133,6 +133,10 @@ impl Config {
         self.api_url("harvest")
     }
 
+    pub fn icon_sheet_endpoint(&self, sheet: u32) -> String {
+        self.api_url(&format!("icons/sheets/{sheet}"))
+    }
+
     pub fn harvest_dir(&self) -> Option<PathBuf> {
         if !self.harvest.enabled && !self.tools.log_reader.enabled {
             return None;
@@ -212,6 +216,10 @@ mod tests {
         assert_eq!(
             config.harvest_endpoint(),
             "http://localhost:8080/api/v1/harvest"
+        );
+        assert_eq!(
+            config.icon_sheet_endpoint(379),
+            "http://localhost:8080/api/v1/icons/sheets/379"
         );
     }
 

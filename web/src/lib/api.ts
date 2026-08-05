@@ -51,6 +51,7 @@ export interface ItemStats {
 	temporary: boolean;
 	expendable: boolean;
 	quest_item: boolean;
+	icon: number | null;
 	effects: ItemEffect[];
 	focus_effect: string | null;
 	unparsed: string[];

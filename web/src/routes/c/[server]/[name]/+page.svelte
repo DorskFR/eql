@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { SvelteSet } from 'svelte/reactivity';
 	import {
 		AutoGrid,
 		Badge,
@@ -43,6 +44,7 @@
 		damageDelay,
 		equippedTotals,
 		gearPairs,
+		iconUrl,
 		itemPath,
 		RESISTS,
 		type StatRow,
@@ -254,6 +256,8 @@
 
 	const rowKey = (entry: InventoryEntry & { key: string }) => entry.key;
 
+	const brokenIcons = new SvelteSet<string>();
+
 	const tabs: TabItem[] = $derived([
 		{ id: 'stats', label: 'Stats', icon: 'star' },
 		{ id: 'general', label: `General (${general.length})`, icon: 'archive' },
@@ -397,8 +401,21 @@
 
 {#snippet slotCell(label: string, entry: (InventoryEntry & { key: string }) | null)}
 	{#if entry}
+		{@const icon = iconUrl(entry.item?.stats)}
 		<a class="eq-slot eq-filled" href={entry.item ? itemPath(entry.item.name) : itemPath(entry.name)}>
-			<span class="eq-slot-name">{shortName(entry.name)}</span>
+			{#if icon && !brokenIcons.has(icon)}
+				<img
+					class="eq-icon"
+					src={icon}
+					alt={shortName(entry.name)}
+					width="40"
+					height="40"
+					loading="lazy"
+					onerror={() => brokenIcons.add(icon)}
+				/>
+			{:else}
+				<span class="eq-slot-name">{shortName(entry.name)}</span>
+			{/if}
 			{#if entry.upgrade}
 				<span class="eq-upgrade">+{entry.upgrade}</span>
 			{/if}
@@ -1074,6 +1091,12 @@
 		-webkit-line-clamp: 4;
 		line-clamp: 4;
 		-webkit-box-orient: vertical;
+	}
+
+	.eq-icon {
+		width: 4rem;
+		height: 4rem;
+		image-rendering: pixelated;
 	}
 
 	.eq-upgrade {

@@ -45,7 +45,11 @@ pub fn unix_secs(time: SystemTime) -> Option<i64> {
 }
 
 pub fn content_hash(contents: &str) -> String {
-    Sha256::digest(contents.as_bytes())
+    bytes_hash(contents.as_bytes())
+}
+
+pub fn bytes_hash(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
         .iter()
         .fold(String::with_capacity(64), |mut acc, byte| {
             use std::fmt::Write;

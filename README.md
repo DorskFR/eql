@@ -45,6 +45,21 @@ hidden = ["dps"]            # …of which these never appear on screen
 | `hidden` | `[]` | Subset of `overlays` launched on an isolated desktop (Windows only). |
 | `atlas` | `"replay"` | Who keeps the Atlas database: `"replay"` or `"overlay"`. |
 
+### Item icons
+
+```sh
+eqld <config.toml> upload-icons [--force]
+```
+
+Ships every `<game.root>/uifiles/default/dragitem<n>.dds` sheet to
+`PUT /api/v1/icons/sheets/<n>`, where the server crops the 36 40x40 icons out
+of each one. Run it once per machine: the client's art never changes, so a
+sheet already accepted is skipped on later runs unless `--force` is given. A
+sheet the server refuses outright is parked (rerun with `--force` once the
+cause is fixed); a transport or 5xx failure is logged and retried by the next
+run, and neither stops the other sheets. This is a one-shot — the daemon loop
+never touches icons.
+
 Overlays start when `eqgame.exe` appears, are pointed at the character log the
 client is currently writing, are restarted with backoff if they die, and are
 stopped when the game exits or eqld shuts down. Switching character in-game

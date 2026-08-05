@@ -1,11 +1,12 @@
 use crate::{
+    icons::{self, IconError},
     skin::{self, SkinError},
     stats::{derive_gear_stats, is_equipped_location, GearStats},
     wiki::ItemStats,
 };
 use axum::{
-    body::Body,
-    extract::{Path, Query, Request, State},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{from_fn_with_state, Next},
     response::{IntoResponse, Response},
@@ -19,14 +20,31 @@ use eql_core::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{types::Json as SqlJson, PgPool, Row};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 use time::OffsetDateTime;
 use tower_http::services::{ServeDir, ServeFile};
+
+const SHEET_LIMIT: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub machine_token: Arc<str>,
+    icons: Arc<RwLock<HashMap<i32, Bytes>>>,
+}
+
+impl AppState {
+    pub fn new(pool: PgPool, machine_token: Arc<str>) -> Self {
+        Self {
+            pool,
+            machine_token,
+            icons: Arc::default(),
+        }
+    }
 }
 
 pub fn router(state: AppState, web_dist: PathBuf) -> Router {
@@ -34,6 +52,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route("/api/v1/inventory", post(ingest))
         .route("/api/v1/events", post(ingest_events))
         .route("/api/v1/harvest", post(ingest_harvest))
+        .route(
+            "/api/v1/icons/sheets/{sheet}",
+            put(put_icon_sheet).layer(DefaultBodyLimit::max(SHEET_LIMIT)),
+        )
         .route(
             "/api/v1/layouts/{name}",
             put(put_layout).delete(delete_layout),
@@ -59,6 +81,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             "/api/v1/characters/{server}/{name}/harvest/{kind}",
             get(get_harvest),
         )
+        .route("/api/v1/icons/{file}", get(get_icon))
         .route("/api/v1/items", get(search_items))
         .route("/api/v1/items/{key}", get(get_item))
         .route("/api/v1/layouts", get(list_layouts))
@@ -924,6 +947,93 @@ async fn layout_bundle(
         .into_response())
 }
 
+#[derive(Serialize)]
+struct SheetAccepted {
+    sheet: u32,
+    icons: usize,
+}
+
+async fn put_icon_sheet(
+    State(state): State<AppState>,
+    Path(sheet): Path<u32>,
+    dds: Bytes,
+) -> Result<Json<SheetAccepted>, AppError> {
+    let cells = icons::split_sheet(sheet, &dds)?;
+    let (ids, pngs): (Vec<i32>, Vec<Vec<u8>>) = cells.into_iter().unzip();
+    sqlx::query(
+        "insert into item_icons (icon, png) \
+         select * from unnest($1::int[], $2::bytea[]) \
+         on conflict (icon) do update set png = excluded.png, updated_at = now()",
+    )
+    .bind(&ids)
+    .bind(&pngs)
+    .execute(&state.pool)
+    .await?;
+
+    let mut cache = state.icons.write().expect("icon cache is not poisoned");
+    for icon in &ids {
+        cache.remove(icon);
+    }
+    drop(cache);
+
+    tracing::info!(sheet, icons = ids.len(), "stored icon sheet");
+    Ok(Json(SheetAccepted {
+        sheet,
+        icons: ids.len(),
+    }))
+}
+
+/// A path capture cannot carry a literal suffix in axum, so `624.png` arrives
+/// whole and the extension is stripped here.
+async fn get_icon(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+) -> Result<Response, AppError> {
+    let icon: i32 = file
+        .strip_suffix(".png")
+        .and_then(|icon| icon.parse().ok())
+        .ok_or(AppError::NotFound)?;
+    if icons::locate(icon).is_none() {
+        return Err(AppError::NotFound);
+    }
+    let cached = state
+        .icons
+        .read()
+        .expect("icon cache is not poisoned")
+        .get(&icon)
+        .cloned();
+    let png = match cached {
+        Some(png) => png,
+        None => {
+            let png: Vec<u8> = sqlx::query_scalar("select png from item_icons where icon = $1")
+                .bind(icon)
+                .fetch_optional(&state.pool)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            let png = Bytes::from(png);
+            state
+                .icons
+                .write()
+                .expect("icon cache is not poisoned")
+                .insert(icon, png.clone());
+            png
+        }
+    };
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png".to_string()),
+            (
+                header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable".to_string(),
+            ),
+            (header::ETAG, format!("\"icon-{icon}\"")),
+        ],
+        Body::from(png),
+    )
+        .into_response())
+}
+
 #[derive(Debug, thiserror::Error)]
 enum AppError {
     #[error("missing or invalid bearer token")]
@@ -948,6 +1058,8 @@ enum AppError {
     BadScreen(i32, i32),
     #[error(transparent)]
     Skin(#[from] SkinError),
+    #[error(transparent)]
+    Icon(#[from] IconError),
     #[error("no inventory snapshot for that character")]
     NotFound,
     #[error(transparent)]
@@ -967,6 +1079,7 @@ impl IntoResponse for AppError {
             | AppError::EmptyLayoutName
             | AppError::BadScreen(_, _)
             | AppError::Skin(_)
+            | AppError::Icon(_)
             | AppError::BadCursor(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Database(ref err) => {
@@ -995,10 +1108,7 @@ mod tests {
             .connect_lazy("postgres://nobody:nobody@127.0.0.1:1/nothing")
             .unwrap();
         router(
-            AppState {
-                pool,
-                machine_token: Arc::from("s3cret"),
-            },
+            AppState::new(pool, Arc::from("s3cret")),
             PathBuf::from("web/build"),
         )
     }
@@ -1155,10 +1265,7 @@ mod tests {
             .await
             .unwrap();
         let app = router(
-            AppState {
-                pool: pool.clone(),
-                machine_token: Arc::from("s3cret"),
-            },
+            AppState::new(pool.clone(), Arc::from("s3cret")),
             PathBuf::from("web/build"),
         );
         Some((app, pool))
@@ -1735,6 +1842,175 @@ mod tests {
         assert_eq!(stats["stats"]["mana"], 25);
         assert_eq!(stats["stats"]["known_items"], 2);
         assert_eq!(stats["stats"]["unknown_items"], 1);
+    }
+
+    /// A bad route pattern only panics when the `Router` is assembled, so this
+    /// keeps a route-syntax mistake from reaching `main`.
+    #[tokio::test]
+    async fn the_router_accepts_every_route_pattern() {
+        let _ = test_app();
+    }
+
+    fn put_sheet(sheet: u32, token: Option<&str>, dds: Vec<u8>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/v1/icons/sheets/{sheet}"))
+            .header("content-type", "application/octet-stream");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::from(dds)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn icon_sheet_uploads_need_the_machine_token() {
+        let dds = crate::icons::dxt5_sheet(&[]);
+        assert_eq!(
+            status_of(put_sheet(1, None, dds.clone())).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of(put_sheet(1, Some("wrong"), dds)).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn undecodable_sheets_are_rejected_before_the_database() {
+        assert_eq!(
+            status_of(put_sheet(1, Some("s3cret"), b"not a dds".to_vec())).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            status_of(put_sheet(0, Some("s3cret"), crate::icons::dxt5_sheet(&[]))).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn icon_reads_reject_bad_names_and_ids_without_a_query() {
+        let get = |path: &str| {
+            Request::builder()
+                .uri(format!("/api/v1/icons/{path}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        for path in ["624", "624.jpg", "notanicon.png", "499.png", "14144.png"] {
+            assert_eq!(status_of(get(path)).await, StatusCode::NOT_FOUND, "{path}");
+        }
+        assert_eq!(
+            status_of(get("624.png")).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an in-range id does reach the database"
+        );
+    }
+
+    #[tokio::test]
+    async fn icon_sheets_upsert_and_serve_cropped_pngs() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+        sqlx::query("truncate item_icons")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (status, accepted) = json_of(
+            &app,
+            put_sheet(4, Some("s3cret"), crate::icons::dxt5_sheet(&[(2, 4)])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(accepted["sheet"], 4);
+        assert_eq!(accepted["icons"], 35);
+
+        let stored: i64 = sqlx::query_scalar("select count(*) from item_icons")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 35);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/icons/608.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(response.headers()["etag"], "\"icon-608\"");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let png = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).unwrap();
+        assert_eq!(png.width(), 40);
+        assert_eq!(png.height(), 40);
+
+        assert_eq!(
+            status_of_on(&app, "/api/v1/icons/624.png").await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_of_on(&app, "/api/v1/icons/500.png").await,
+            StatusCode::NOT_FOUND
+        );
+
+        let (_, again) = json_of(
+            &app,
+            put_sheet(4, Some("s3cret"), crate::icons::bgra_sheet(&[])),
+        )
+        .await;
+        assert_eq!(again["icons"], 36);
+        assert_eq!(
+            status_of_on(&app, "/api/v1/icons/624.png").await,
+            StatusCode::OK
+        );
+    }
+
+    async fn status_of_on(app: &Router, uri: &str) -> StatusCode {
+        app.clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn reparse_rewrites_stats_from_the_stored_wikitext() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+        let wikitext =
+            "{{Itempage|itemname = Bronze Helm|lucy_img_ID = 550|statsblock = \nAC: 14<br>\n}}";
+        sqlx::query(
+            "insert into items (name, stats, wikitext) values ('Reparse Probe', '{}'::jsonb, $1) \
+             on conflict (name) do update set stats = '{}'::jsonb, wikitext = excluded.wikitext",
+        )
+        .bind(wikitext)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let summary = crate::scrape::reparse(&pool).await.unwrap();
+        assert!(summary.upserted >= 1);
+
+        let (status, item) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/items/Reparse%20Probe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(item["stats"]["icon"], 550);
+        assert_eq!(item["stats"]["ac"], 14);
     }
 
     #[test]

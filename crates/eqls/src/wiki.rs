@@ -19,6 +19,7 @@ pub struct ItemEffect {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ItemStats {
     pub name: String,
+    pub icon: Option<i64>,
     pub slots: Vec<String>,
     pub classes: Vec<String>,
     pub races: Vec<String>,
@@ -194,6 +195,7 @@ pub fn parse_item(page_title: &str, wikitext: &str) -> Option<ItemStats> {
 
     let mut stats = ItemStats {
         name,
+        icon: get("lucy_img_id").and_then(|v| v.trim().parse().ok()),
         ..Default::default()
     };
 
@@ -578,6 +580,7 @@ mod tests {
     #[test]
     fn weapon_with_proc() {
         let item = parse("Spirit_Reaver");
+        assert_eq!(item.icon, Some(576));
         assert_eq!(item.name, "Spirit Reaver");
         assert_eq!(item.slots, ["PRIMARY"]);
         assert_eq!(item.item_type.as_deref(), Some("1H Slashing"));
@@ -607,6 +610,7 @@ mod tests {
     #[test]
     fn armor_with_regen() {
         let item = parse("Rubicite_Breastplate");
+        assert_eq!(item.icon, Some(624));
         assert_eq!(item.name, "Rubicite Breastplate");
         assert_eq!(item.slots, ["CHEST"]);
         assert_eq!(item.ac, Some(19));
@@ -625,6 +629,7 @@ mod tests {
     #[test]
     fn resists_and_haste() {
         let item = parse("Cloak_of_Flames");
+        assert_eq!(item.icon, Some(658));
         assert_eq!(item.slots, ["BACK"]);
         assert_eq!(item.ac, Some(10));
         assert_eq!(item.dex, Some(9));
@@ -642,6 +647,7 @@ mod tests {
     #[test]
     fn container() {
         let item = parse("Bag_of_the_Tinkerers");
+        assert_eq!(item.icon, Some(557));
         assert_eq!(item.name, "Bag of the Tinkerers");
         assert_eq!(item.weight, Some(1.0));
         assert_eq!(item.weight_reduction, Some(100));
@@ -656,6 +662,7 @@ mod tests {
     #[test]
     fn simple_no_stat_item() {
         let item = parse("Bone_Chips");
+        assert_eq!(item.icon, Some(804));
         assert_eq!(item.name, "Bone Chips");
         assert_eq!(item.weight, Some(0.1));
         assert_eq!(item.size.as_deref(), Some("SMALL"));
@@ -671,6 +678,7 @@ mod tests {
     #[test]
     fn focus_effect_param() {
         let item = parse("Azure_Sleeves");
+        assert_eq!(item.icon, Some(669));
         assert_eq!(item.slots, ["ARMS"]);
         assert_eq!(item.ac, Some(12));
         assert_eq!(item.focus_effect.as_deref(), Some("Improved Damage I"));
@@ -688,6 +696,7 @@ mod tests {
     #[test]
     fn click_effect_with_required_level() {
         let item = parse("Azarack_Skin_Wristwraps");
+        assert_eq!(item.icon, Some(637));
         assert_eq!(item.slots, ["WRIST"]);
         assert!(item.no_trade && !item.magic);
         assert_eq!(item.classes, ["BST"]);
