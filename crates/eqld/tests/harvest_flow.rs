@@ -328,3 +328,101 @@ async fn state_survives_a_restart() {
     assert_eq!(restarted.tick().await.harvested, 0);
     assert_eq!(recorder.count(), 3);
 }
+
+#[cfg(unix)]
+fn stub_reader(dir: &TempDir, harvest: &TempDir) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.path().join("eql_atlas_stub");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = --replay ] || exit 64\n[ -f \"$2\" ] || exit 65\ncp {src} {dst}\n",
+            src = fixtures().join(ATLAS).display(),
+            dst = harvest.path().join(ATLAS).display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn orchestrated(game: &TempDir, harvest: &TempDir, exe: &Path, addr: SocketAddr) -> Daemon {
+    let config: Config = toml::from_str(&format!(
+        r#"
+        [game]
+        root = {root}
+        poll_secs = 1
+        [api]
+        url = "http://{addr}"
+        token = "machine-token"
+        [state]
+        path = {state}
+        [harvest]
+        enabled = true
+        dir = {dir}
+        [tools.log_reader]
+        enabled = true
+        exe = {exe}
+        replay_secs = 0
+        "#,
+        root = toml::Value::from(game.path().to_str().unwrap()),
+        state = toml::Value::from(game.path().join("state.json").to_str().unwrap()),
+        dir = toml::Value::from(harvest.path().to_str().unwrap()),
+        exe = toml::Value::from(exe.to_str().unwrap()),
+    ))
+    .unwrap();
+    Daemon::new(config).unwrap()
+}
+
+/// The whole point of the orchestrator: eqld drives the reader, and the JSON it
+/// writes is picked up and shipped in the same tick.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_daemon_drives_the_log_reader_and_ships_what_it_writes() {
+    let recorder = Recorder::new(201);
+    let addr = spawn_server(recorder.clone()).await;
+    let game = tempfile::tempdir().unwrap();
+    let harvest = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("Logs")).unwrap();
+    std::fs::write(
+        game.path().join("Logs").join("eqlog_Dorsk_erudin.txt"),
+        "[Wed Aug 05 19:24:52 2026] Logging is now *ON*.\n",
+    )
+    .unwrap();
+
+    let exe = stub_reader(&game, &harvest);
+    assert!(
+        !harvest.path().join(ATLAS).exists(),
+        "nothing to harvest before the reader runs"
+    );
+
+    let mut daemon = orchestrated(&game, &harvest, &exe, addr);
+    assert!(
+        daemon.runner().is_some(),
+        "the configured exe is discovered"
+    );
+
+    let report = daemon.tick().await;
+    assert_eq!(
+        report.harvested, 1,
+        "the file the reader just wrote shipped"
+    );
+    assert_eq!(recorder.kinds(), vec!["atlas"]);
+    assert!(harvest.path().join(ATLAS).exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_reader_leaves_the_daemon_running() {
+    let recorder = Recorder::new(201);
+    let addr = spawn_server(recorder.clone()).await;
+    let game = tempfile::tempdir().unwrap();
+    let harvest = tempfile::tempdir().unwrap();
+    let missing = game.path().join("not-installed");
+
+    let mut daemon = orchestrated(&game, &harvest, &missing, addr);
+    assert!(daemon.runner().is_none(), "nothing to discover");
+    assert_eq!(daemon.tick().await.harvested, 0);
+    assert_eq!(recorder.count(), 0);
+}
