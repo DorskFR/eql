@@ -334,8 +334,10 @@ pub fn install(root: &Path) -> Vec<Result<Report, SocialsError>> {
         .collect()
 }
 
-pub fn game_is_running() -> bool {
-    crate::overlays::ProcessWatch::new().is_running(crate::overlays::GAME_PROCESS)
+pub fn game_is_running(config: &Config) -> Option<bool> {
+    config
+        .game_process()
+        .map(|name| crate::overlays::ProcessWatch::new().is_running(name))
 }
 
 pub fn run(config: &Config, args: &[String]) -> Result<(), SocialsError> {
@@ -343,8 +345,13 @@ pub fn run(config: &Config, args: &[String]) -> Result<(), SocialsError> {
         println!("usage: eqld [config.toml] install-social");
         return Ok(());
     }
-    if game_is_running() {
-        return Err(SocialsError::GameRunning);
+    match game_is_running(config) {
+        Some(true) => return Err(SocialsError::GameRunning),
+        Some(false) => {}
+        None => eprintln!(
+            "[game] process is empty, so whether the client is running cannot be checked; \
+             make sure the game is closed, it rewrites this file when it exits"
+        ),
     }
 
     let root = &config.game.root;

@@ -9,6 +9,7 @@ pub mod harvest;
 pub mod hidden;
 pub mod icons;
 pub mod install;
+pub mod lock;
 pub mod logs;
 pub mod overlays;
 pub mod skin;

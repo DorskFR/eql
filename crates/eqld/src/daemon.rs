@@ -1,8 +1,8 @@
 use crate::{
     backoff::Backoff,
     config::Config,
-    fights, harvest, logs,
-    state::{FightsState, FileState, LastStatus, LogState, State},
+    fights, harvest, logs, skin,
+    state::{FightsState, FileState, LastStatus, LogState, SkinState, State},
 };
 use eql_core::{
     api::{HarvestDoc, InventoryUpload, LogBatch},
@@ -103,7 +103,22 @@ pub struct TickReport {
     pub harvest_skipped: usize,
     pub fights: usize,
     pub socials: usize,
+    pub skins: usize,
 }
+
+/// Whether the client owns its files right now. `Undetectable` is not a
+/// synonym for closed: nothing eqld writes into the game root is safe then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Game {
+    Closed,
+    Running,
+    Undetectable,
+}
+
+pub const UNDETECTABLE_NOTE: &str =
+    "[game] process is empty, so eqld cannot tell whether the client is running; \
+     it will not write into the game root on its own. Close the game and run the \
+     install-social / install-skin subcommands by hand.";
 
 /// One tick reads at most this much of each log; the rest waits for the next
 /// tick so a long-idle daemon cannot pull a whole session into memory.
@@ -148,6 +163,8 @@ pub struct Daemon {
     processes: crate::overlays::ProcessWatch,
     config_watch: Option<crate::config::Watch>,
     socials_note: Option<String>,
+    skin_note: Option<String>,
+    last_skin_check: Option<std::time::Instant>,
 }
 
 impl Daemon {
@@ -223,6 +240,8 @@ impl Daemon {
             processes: crate::overlays::ProcessWatch::new(),
             config_watch: None,
             socials_note: None,
+            skin_note: None,
+            last_skin_check: None,
         })
     }
 
@@ -462,14 +481,31 @@ impl Daemon {
 
     /// The client rewrites the character ini when it exits, so a social
     /// written during a session is thrown away: only write with the game shut.
-    fn install_socials(&mut self, root: &Path, report: &mut TickReport) {
+    fn look_at_game(&mut self) -> Game {
+        match self.config.game_process() {
+            None => Game::Undetectable,
+            Some(name) => match self.processes.is_running(name) {
+                true => Game::Running,
+                false => Game::Closed,
+            },
+        }
+    }
+
+    fn install_socials(&mut self, root: &Path, game: Game, report: &mut TickReport) {
         if !self.config.socials.enabled {
             self.socials_note = None;
             return;
         }
-        if self.processes.is_running(crate::overlays::GAME_PROCESS) {
-            self.note_socials("the game is running; the social will be applied once it exits");
-            return;
+        match game {
+            Game::Closed => {}
+            Game::Running => {
+                self.note_socials("the game is running; the social will be applied once it exits");
+                return;
+            }
+            Game::Undetectable => {
+                self.note_socials(UNDETECTABLE_NOTE);
+                return;
+            }
         }
 
         let mut notes = Vec::new();
@@ -508,18 +544,96 @@ impl Daemon {
         self.socials_note = Some(note.to_string());
     }
 
-    async fn supervise_overlays(&mut self, root: &Path) {
-        let Self {
-            overlays: Some(supervisor),
-            processes,
-            ..
-        } = self
-        else {
+    async fn supervise_overlays(&mut self, root: &Path, game: Game) {
+        let Some(supervisor) = &mut self.overlays else {
             return;
         };
-        let running = processes.is_running(crate::overlays::GAME_PROCESS);
+        let running = game == Game::Running;
         let log = running.then(|| logs::latest(root)).flatten();
         supervisor.tick(running, log.as_deref()).await;
+    }
+
+    /// `<root>/uifiles/` and the `UI_*_LO1.ini` belong to the client, so the
+    /// skin only lands while the game is provably closed.
+    async fn sync_skin(&mut self, root: &Path, game: Game, report: &mut TickReport) -> bool {
+        let settings = self.config.skin.clone();
+        if !settings.enabled {
+            self.skin_note = None;
+            self.last_skin_check = None;
+            return false;
+        }
+        let Some(layout) = settings.wanted().map(str::trim).filter(|l| !l.is_empty()) else {
+            self.note_skin("[skin] enabled is on but no layout is named; nothing to install");
+            return false;
+        };
+        match game {
+            Game::Closed => {}
+            Game::Running => {
+                self.note_skin("the game is running; the skin will be installed once it exits");
+                return false;
+            }
+            Game::Undetectable => {
+                self.note_skin(UNDETECTABLE_NOTE);
+                return false;
+            }
+        }
+        if self
+            .last_skin_check
+            .is_some_and(|at| at.elapsed() < settings.check_interval())
+        {
+            return false;
+        }
+        self.last_skin_check = Some(std::time::Instant::now());
+
+        let args = skin::Args {
+            layout: layout.to_string(),
+            skin: settings.name.clone(),
+        };
+        let bytes = match skin::fetch(&self.config, &args).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.note_skin(&format!("cannot fetch the skin bundle: {err}"));
+                return false;
+            }
+        };
+        let digest = bytes_hash(&bytes);
+        if !skin::changed(self.state.skin.as_ref(), &args, &digest) {
+            self.skin_note = None;
+            return false;
+        }
+        match skin::install(root, &bytes) {
+            Ok(installed) => {
+                report.skins += 1;
+                self.skin_note = None;
+                self.state.skin = Some(SkinState {
+                    layout: args.layout.clone(),
+                    name: args.skin.clone(),
+                    digest,
+                    installed: installed.clone(),
+                    installed_at: unix_secs(SystemTime::now()),
+                });
+                tracing::info!(
+                    layout = %args.layout,
+                    skin = %installed,
+                    root = %root.display(),
+                    "a new skin is installed; run in game: /loadskin {}",
+                    installed
+                );
+                true
+            }
+            Err(err) => {
+                self.note_skin(&format!("cannot install the skin bundle: {err}"));
+                false
+            }
+        }
+    }
+
+    fn note_skin(&mut self, note: &str) {
+        if self.skin_note.as_deref() == Some(note) {
+            return;
+        }
+        tracing::info!(note, "skin not installed");
+        self.skin_note = Some(note.to_string());
     }
 
     pub async fn shutdown(&mut self) {
@@ -593,8 +707,10 @@ impl Daemon {
         dirty_state |= logs_dirty;
 
         dirty_state |= self.run_replay(&root, &mut report).await;
-        self.install_socials(&root, &mut report);
-        self.supervise_overlays(&root).await;
+        let game = self.look_at_game();
+        self.install_socials(&root, game, &mut report);
+        dirty_state |= self.sync_skin(&root, game, &mut report).await;
+        self.supervise_overlays(&root, game).await;
 
         let mut harvest_files = None;
         if let Some(dir) = self.config.harvest_dir() {

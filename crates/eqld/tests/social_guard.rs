@@ -3,11 +3,14 @@ use std::path::Path;
 
 const REAL: &[u8] = include_bytes!("../../../fixtures/ini/Dorsk_erudin_LO1.ini");
 
+const PROCESS: &str = "eqg-social.exe";
+
 fn config(root: &Path, enabled: bool) -> Config {
     toml::from_str(&format!(
         r#"
         [game]
         root = "{root}"
+        process = "{PROCESS}"
         [api]
         url = "http://127.0.0.1:1"
         token = "t"
@@ -33,6 +36,23 @@ fn game_root() -> tempfile::TempDir {
     root
 }
 
+#[tokio::test]
+async fn nothing_is_written_when_the_client_cannot_be_found_in_the_process_list() {
+    let root = game_root();
+    let ini = root.path().join("Dorsk_erudin_LO1.ini");
+    let mut config = config(root.path(), true);
+    config.game.process = String::new();
+    assert_eq!(config.game_process(), None);
+
+    let mut daemon = Daemon::new(config).unwrap();
+    assert_eq!(daemon.tick().await.socials, 0);
+    assert_eq!(
+        std::fs::read(&ini).unwrap(),
+        REAL,
+        "a client that cannot be seen is never assumed to be closed"
+    );
+}
+
 /// The client owns this file while it runs and rewrites it on exit, so a
 /// social written mid-session is thrown away.
 #[cfg(target_os = "linux")]
@@ -40,7 +60,7 @@ fn game_root() -> tempfile::TempDir {
 async fn nothing_is_written_while_the_game_is_running() {
     let root = game_root();
     let ini = root.path().join("Dorsk_erudin_LO1.ini");
-    let fake = root.path().join(eqld::overlays::GAME_PROCESS);
+    let fake = root.path().join(PROCESS);
     std::fs::copy("/bin/sleep", &fake).unwrap();
 
     let mut game = tokio::process::Command::new(&fake)

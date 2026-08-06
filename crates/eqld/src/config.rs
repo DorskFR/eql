@@ -13,12 +13,43 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub socials: SocialsConfig,
+    #[serde(default)]
+    pub skin: SkinConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SocialsConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct SkinConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub layout: Option<String>,
+    pub name: Option<String>,
+    #[serde(default = "default_skin_check_secs")]
+    pub check_secs: u64,
+}
+
+impl SkinConfig {
+    pub fn wanted(&self) -> Option<&str> {
+        self.enabled.then_some(self.layout.as_deref()).flatten()
+    }
+
+    /// `0` asks for a check on every poll tick; anything else is held to 30s so
+    /// a small `poll_secs` cannot turn into a bundle download per second.
+    pub fn check_interval(&self) -> std::time::Duration {
+        match self.check_secs {
+            0 => std::time::Duration::ZERO,
+            secs => std::time::Duration::from_secs(secs.max(30)),
+        }
+    }
+}
+
+fn default_skin_check_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -96,6 +127,12 @@ pub struct GameConfig {
     pub root: PathBuf,
     #[serde(default = "default_poll_secs")]
     pub poll_secs: u64,
+    #[serde(default = "default_game_process")]
+    pub process: String,
+}
+
+fn default_game_process() -> String {
+    crate::overlays::GAME_PROCESS.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,6 +170,13 @@ impl Config {
 
     pub fn state_path(&self) -> PathBuf {
         self.state.path.clone().unwrap_or_else(default_state_path)
+    }
+
+    /// `None` when the client cannot be seen in the process list at all, and
+    /// eqld must therefore never conclude that the game is closed.
+    pub fn game_process(&self) -> Option<&str> {
+        let name = self.game.process.trim();
+        (!name.is_empty() && !name.eq_ignore_ascii_case("none")).then_some(name)
     }
 
     pub fn endpoint(&self) -> String {
@@ -204,12 +248,17 @@ impl Config {
     /// Keeps every frozen field of `self`, takes the rest from `next`.
     pub fn hot_swap(&self, next: Config) -> Config {
         Config {
-            game: self.game.clone(),
+            game: GameConfig {
+                root: self.game.root.clone(),
+                poll_secs: self.game.poll_secs,
+                process: next.game.process,
+            },
             api: self.api.clone(),
             state: self.state.clone(),
             harvest: next.harvest,
             tools: next.tools,
             socials: next.socials,
+            skin: next.skin,
         }
     }
 }
@@ -776,6 +825,120 @@ mod tests {
             bare.frozen_changes(&asked).is_empty(),
             "it is hot-swappable"
         );
+    }
+
+    #[test]
+    fn the_game_process_defaults_to_the_windows_client_and_can_be_renamed() {
+        let with = |game: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                {game}
+                [api]
+                url = "u"
+                token = "t"
+                "#
+            ))
+            .unwrap()
+        };
+        assert_eq!(with("").game.process, crate::overlays::GAME_PROCESS);
+        assert_eq!(with("").game_process(), Some("eqgame.exe"));
+        assert_eq!(
+            with(r#"process = "eqgame64.exe""#).game_process(),
+            Some("eqgame64.exe")
+        );
+        for undetectable in [
+            r#"process = """#,
+            r#"process = "  ""#,
+            r#"process = "none""#,
+        ] {
+            assert_eq!(
+                with(undetectable).game_process(),
+                None,
+                "{undetectable} says the client cannot be seen at all"
+            );
+        }
+    }
+
+    #[test]
+    fn the_game_process_is_swapped_without_a_restart() {
+        let before: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            "#,
+        )
+        .unwrap();
+        let after: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            process = "wine-preloader"
+            [api]
+            url = "u"
+            token = "t"
+            "#,
+        )
+        .unwrap();
+        assert!(before.frozen_changes(&after).is_empty());
+        assert_eq!(
+            before.hot_swap(after).game_process(),
+            Some("wine-preloader")
+        );
+    }
+
+    #[test]
+    fn the_skin_stays_off_until_a_layout_is_named_and_it_is_switched_on() {
+        let with = |skin: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                [api]
+                url = "u"
+                token = "t"
+                {skin}
+                "#
+            ))
+            .unwrap()
+        };
+        let bare = with("");
+        assert!(!bare.skin.enabled);
+        assert_eq!(bare.skin.wanted(), None);
+
+        assert_eq!(
+            with("[skin]\nlayout = \"dorskui\"").skin.wanted(),
+            None,
+            "naming a layout is not asking for it"
+        );
+        let on = with("[skin]\nenabled = true\nlayout = \"dorskui\"\nname = \"v4\"");
+        assert_eq!(on.skin.wanted(), Some("dorskui"));
+        assert_eq!(on.skin.name.as_deref(), Some("v4"));
+        assert_eq!(on.skin.check_interval().as_secs(), 300);
+        assert_eq!(
+            with("[skin]\nenabled = true\nlayout = \"a\"\ncheck_secs = 1")
+                .skin
+                .check_interval()
+                .as_secs(),
+            30,
+            "the bundle is not fetched on every poll tick"
+        );
+        assert_eq!(
+            with("[skin]\nenabled = true\nlayout = \"a\"\ncheck_secs = 0")
+                .skin
+                .check_interval(),
+            std::time::Duration::ZERO,
+            "unless zero asks for exactly that"
+        );
+        assert!(
+            bare.frozen_changes(&on).is_empty(),
+            "the skin is hot-swappable"
+        );
+        assert_eq!(bare.hot_swap(on).skin.wanted(), Some("dorskui"));
     }
 
     #[test]
