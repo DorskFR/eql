@@ -68,5 +68,8 @@ async fn a_reapplied_social_survives_the_client_rewriting_the_file() {
 
     std::fs::write(&ini, REAL).unwrap();
     assert_eq!(daemon.tick().await.socials, 1);
-    assert_eq!(std::fs::read(&ini).unwrap(), socials::apply(REAL).unwrap());
+    assert_eq!(
+        std::fs::read(&ini).unwrap(),
+        socials::apply(REAL, socials::Placement::default()).unwrap()
+    );
 }

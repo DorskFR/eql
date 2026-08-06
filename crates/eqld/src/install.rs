@@ -1,7 +1,21 @@
-use crate::config::Config;
+use crate::config::{Config, LogReaderConfig};
 use crate::tools::{self, Runner};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Installed {
+    Already(Runner),
+    Fresh(Runner),
+}
+
+impl Installed {
+    pub fn runner(&self) -> &Runner {
+        match self {
+            Installed::Already(runner) | Installed::Fresh(runner) => runner,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct Release {
@@ -22,13 +36,20 @@ pub async fn run(config: &Config, args: &[String]) -> Result<(), InstallError> {
         return Ok(());
     }
     let force = args.iter().any(|arg| arg == "--force");
-    let settings = &config.tools.log_reader;
+    match ensure(&config.tools.log_reader, force).await? {
+        Installed::Already(runner) => {
+            println!("already installed: {}", runner.program().display())
+        }
+        Installed::Fresh(runner) => println!("installed: {}", runner.program().display()),
+    }
+    Ok(())
+}
 
+pub async fn ensure(settings: &LogReaderConfig, force: bool) -> Result<Installed, InstallError> {
     if !force {
         if let Some(runner) = Runner::discover(settings.exe.as_deref()) {
             tracing::info!(at = %runner.program().display(), "log reader already installed");
-            println!("already installed: {}", runner.program().display());
-            return Ok(());
+            return Ok(Installed::Already(runner));
         }
     }
 
@@ -95,8 +116,7 @@ pub async fn run(config: &Config, args: &[String]) -> Result<(), InstallError> {
     match Runner::discover(settings.exe.as_deref()) {
         Some(runner) => {
             tracing::info!(at = %runner.program().display(), "log reader installed");
-            println!("installed: {}", runner.program().display());
-            Ok(())
+            Ok(Installed::Fresh(runner))
         }
         None => Err(InstallError::NotFoundAfterInstall(path)),
     }
@@ -125,10 +145,14 @@ fn same_shape(name: &str, wanted: &str) -> bool {
 
 async fn install_asset(path: &Path) -> Result<(), InstallError> {
     let status = if cfg!(windows) {
-        tokio::process::Command::new(path)
-            .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
-            .status()
-            .await
+        let mut command = tokio::process::Command::new(path);
+        command.args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        command.status().await
     } else {
         let dir = path.parent().unwrap_or(Path::new(".")).join("unpacked");
         std::fs::create_dir_all(&dir).map_err(InstallError::Io)?;

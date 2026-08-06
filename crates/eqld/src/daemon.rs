@@ -1,7 +1,9 @@
 use crate::{
     backoff::Backoff,
     config::Config,
-    fights, harvest, logs, skin,
+    fights, harvest, logs,
+    notice::{Notice, Notices},
+    skin,
     state::{FightsState, FileState, LastStatus, LogState, SkinState, State},
 };
 use eql_core::{
@@ -124,6 +126,36 @@ pub const UNDETECTABLE_NOTE: &str =
 /// tick so a long-idle daemon cannot pull a whole session into memory.
 const MAX_LOG_CHUNK: u64 = 4 * 1024 * 1024;
 
+const INSTALL_RETRY: Duration = Duration::from_secs(60);
+const INSTALL_RETRY_MAX: Duration = Duration::from_secs(3600);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallStep {
+    NotWanted,
+    Off,
+    Waiting,
+    Go,
+}
+
+fn install_step(
+    asked_for: bool,
+    installed: bool,
+    auto_install: bool,
+    next: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> InstallStep {
+    if !asked_for || installed {
+        return InstallStep::NotWanted;
+    }
+    if !auto_install {
+        return InstallStep::Off;
+    }
+    match next {
+        Some(at) if now < at => InstallStep::Waiting,
+        _ => InstallStep::Go,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Watched {
     inventories: usize,
@@ -162,8 +194,17 @@ pub struct Daemon {
     overlays: Option<crate::overlays::Supervisor>,
     processes: crate::overlays::ProcessWatch,
     config_watch: Option<crate::config::Watch>,
-    socials_note: Option<String>,
-    skin_note: Option<String>,
+    socials_note: Notice,
+    skin_note: Notice,
+    root_scan: Notice,
+    log_scan: Notice,
+    harvest_scan: Notice,
+    inventory_notes: Notices,
+    log_notes: Notices,
+    harvest_notes: Notices,
+    install_note: Notice,
+    install_backoff: Backoff,
+    next_install: Option<std::time::Instant>,
     last_skin_check: Option<std::time::Instant>,
 }
 
@@ -209,11 +250,17 @@ impl Daemon {
             .then(|| crate::tools::Runner::discover(settings.exe.as_deref()))
             .flatten();
         if asked_for && installed.is_none() {
+            let next = match settings.auto_install {
+                true => "the first tick will install it",
+                false => "nothing will be harvested and no overlay can start",
+            };
             tracing::warn!(
                 hint = crate::tools::install_hint(settings),
                 harvest = settings.enabled,
+                auto_install = settings.auto_install,
                 overlays = ?plan.wanted.iter().map(|o| o.name()).collect::<Vec<_>>(),
-                "log reader not found; nothing will be harvested and no overlay can start"
+                next,
+                "log reader not found"
             );
         }
         let runner = settings
@@ -239,8 +286,17 @@ impl Daemon {
             overlays,
             processes: crate::overlays::ProcessWatch::new(),
             config_watch: None,
-            socials_note: None,
-            skin_note: None,
+            socials_note: Notice::new(),
+            skin_note: Notice::new(),
+            root_scan: Notice::new(),
+            log_scan: Notice::new(),
+            harvest_scan: Notice::new(),
+            inventory_notes: Notices::new(),
+            log_notes: Notices::new(),
+            harvest_notes: Notices::new(),
+            install_note: Notice::new(),
+            install_backoff: Backoff::with_max(INSTALL_RETRY, INSTALL_RETRY_MAX),
+            next_install: None,
             last_skin_check: None,
         })
     }
@@ -279,11 +335,16 @@ impl Daemon {
             );
         }
         self.config = self.config.hot_swap(config);
+        self.rewire(true).await;
+    }
 
+    async fn rewire(&mut self, verbose: bool) {
         let settings = self.config.tools.log_reader.clone();
         let plan = crate::overlays::plan(&settings);
-        for refusal in &plan.refused {
-            tracing::warn!(%refusal, "overlay not launched");
+        if verbose {
+            for refusal in &plan.refused {
+                tracing::warn!(%refusal, "overlay not launched");
+            }
         }
 
         let asked_for = settings.enabled || !plan.wanted.is_empty();
@@ -328,8 +389,72 @@ impl Daemon {
                 "the log reader does not have these overlays; nothing to start"
             );
         }
-        if changes.is_empty() {
+        if verbose && changes.is_empty() {
             tracing::info!(overlays = ?supervisor.names(), "no overlay change");
+        }
+    }
+
+    /// The reader lands in its own directory, never the game root, so this is
+    /// the one thing eqld installs without waiting for the client to exit —
+    /// otherwise a session that starts without it is harvested by nothing.
+    async fn install_tools(&mut self) {
+        let settings = self.config.tools.log_reader.clone();
+        let plan = crate::overlays::plan(&settings);
+        let asked_for = settings.enabled || !plan.wanted.is_empty();
+        match install_step(
+            asked_for,
+            self.installed.is_some(),
+            settings.auto_install,
+            self.next_install,
+            std::time::Instant::now(),
+        ) {
+            InstallStep::NotWanted => {
+                self.next_install = None;
+                self.install_backoff.reset();
+                return;
+            }
+            InstallStep::Off => {
+                if self.install_note.report("auto_install is off") {
+                    tracing::warn!(
+                        hint = crate::tools::install_hint(&settings),
+                        "the log reader is missing and [tools.log_reader] auto_install is off"
+                    );
+                }
+                return;
+            }
+            InstallStep::Waiting => return,
+            InstallStep::Go => {}
+        }
+
+        tracing::info!(
+            repo = settings.repo(),
+            version = settings.version(),
+            "the log reader is missing; downloading and installing it"
+        );
+        match crate::install::ensure(&settings, false).await {
+            Ok(installed) => {
+                self.install_note.clear();
+                self.next_install = None;
+                self.install_backoff.reset();
+                tracing::info!(
+                    at = %installed.runner().program().display(),
+                    "the log reader is installed; harvesting resumes"
+                );
+                self.rewire(false).await;
+            }
+            Err(err) => {
+                let delay = self.install_backoff.delay();
+                self.install_backoff.fail();
+                self.next_install = Some(std::time::Instant::now() + delay);
+                if self.install_note.report(err.to_string()) {
+                    tracing::error!(
+                        %err,
+                        retry_in_secs = delay.as_secs(),
+                        hint = crate::tools::install_hint(&settings),
+                        "installing the log reader failed"
+                    );
+                }
+            }
         }
     }
 
@@ -493,7 +618,7 @@ impl Daemon {
 
     fn install_socials(&mut self, root: &Path, game: Game, report: &mut TickReport) {
         if !self.config.socials.enabled {
-            self.socials_note = None;
+            self.socials_note.clear();
             return;
         }
         match game {
@@ -509,7 +634,8 @@ impl Daemon {
         }
 
         let mut notes = Vec::new();
-        for outcome in crate::socials::install(root) {
+        let placement = self.config.socials.placement();
+        for outcome in crate::socials::install(root, placement) {
             match outcome {
                 Ok(entry) => match entry.outcome {
                     crate::socials::Outcome::Written => {
@@ -531,17 +657,17 @@ impl Daemon {
             }
         }
         match notes.is_empty() {
-            true => self.socials_note = None,
+            true => {
+                self.socials_note.clear();
+            }
             false => self.note_socials(&notes.join("; ")),
         }
     }
 
     fn note_socials(&mut self, note: &str) {
-        if self.socials_note.as_deref() == Some(note) {
-            return;
+        if self.socials_note.report(note) {
+            tracing::info!(note, "in-game social not applied");
         }
-        tracing::info!(note, "in-game social not applied");
-        self.socials_note = Some(note.to_string());
     }
 
     async fn supervise_overlays(&mut self, root: &Path, game: Game) {
@@ -558,7 +684,7 @@ impl Daemon {
     async fn sync_skin(&mut self, root: &Path, game: Game, report: &mut TickReport) -> bool {
         let settings = self.config.skin.clone();
         if !settings.enabled {
-            self.skin_note = None;
+            self.skin_note.clear();
             self.last_skin_check = None;
             return false;
         }
@@ -598,13 +724,13 @@ impl Daemon {
         };
         let digest = bytes_hash(&bytes);
         if !skin::changed(self.state.skin.as_ref(), &args, &digest) {
-            self.skin_note = None;
+            self.skin_note.clear();
             return false;
         }
         match skin::install(root, &bytes) {
             Ok(installed) => {
                 report.skins += 1;
-                self.skin_note = None;
+                self.skin_note.clear();
                 self.state.skin = Some(SkinState {
                     layout: args.layout.clone(),
                     name: args.skin.clone(),
@@ -629,11 +755,9 @@ impl Daemon {
     }
 
     fn note_skin(&mut self, note: &str) {
-        if self.skin_note.as_deref() == Some(note) {
-            return;
+        if self.skin_note.report(note) {
+            tracing::info!(note, "skin not installed");
         }
-        tracing::info!(note, "skin not installed");
-        self.skin_note = Some(note.to_string());
     }
 
     pub async fn shutdown(&mut self) {
@@ -688,24 +812,39 @@ impl Daemon {
         let mut inventories = 0;
         match scan(&root) {
             Ok(paths) => {
+                if self.root_scan.clear() {
+                    tracing::info!(root = %root.display(), "game root is readable again");
+                }
                 inventories = paths.len();
-                for path in paths {
-                    match self.process(&path, &mut report).await {
-                        Ok(changed) => dirty_state |= changed,
+                let keys: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                self.inventory_notes.retain(&keys);
+                for (path, key) in paths.iter().zip(&keys) {
+                    match self.process(path, &mut report).await {
+                        Ok(changed) => {
+                            dirty_state |= changed;
+                            if self.inventory_notes.clear(key) {
+                                tracing::info!(file = %key, "readable again");
+                            }
+                        }
                         Err(err) => {
-                            tracing::warn!(file = %path.display(), %err, "skipping file this tick")
+                            if self.inventory_notes.report(key, err.to_string()) {
+                                tracing::warn!(file = %key, %err, "skipping file until this changes");
+                            }
                         }
                     }
                 }
             }
             Err(err) => {
-                tracing::error!(root = %root.display(), %err, "cannot scan game root, nothing will upload")
+                if self.root_scan.report(err.to_string()) {
+                    tracing::error!(root = %root.display(), %err, "cannot scan game root, nothing will upload; staying quiet until this changes");
+                }
             }
         }
 
         let (logs_dirty, log_files) = self.tail_logs(&root, &mut report).await;
         dirty_state |= logs_dirty;
 
+        self.install_tools().await;
         dirty_state |= self.run_replay(&root, &mut report).await;
         let game = self.look_at_game();
         self.install_socials(&root, game, &mut report);
@@ -901,18 +1040,36 @@ impl Daemon {
 
     async fn tail_logs(&mut self, root: &Path, report: &mut TickReport) -> (bool, usize) {
         let paths = match logs::scan(root) {
-            Ok(paths) => paths,
+            Ok(paths) => {
+                if self.log_scan.clear() {
+                    tracing::info!(dir = %logs::log_dir(root).display(), "log directory is readable again");
+                }
+                paths
+            }
             Err(err) => {
-                tracing::warn!(dir = %logs::log_dir(root).display(), %err, "cannot scan log directory");
+                if self.log_scan.report(err.to_string()) {
+                    tracing::warn!(dir = %logs::log_dir(root).display(), %err, "cannot scan log directory; staying quiet until this changes");
+                }
                 return (false, 0);
             }
         };
         let count = paths.len();
+        let keys: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        self.log_notes.retain(&keys);
         let mut dirty = false;
-        for path in paths {
-            match self.tail(&path, report).await {
-                Ok(changed) => dirty |= changed,
-                Err(err) => tracing::warn!(file = %path.display(), %err, "skipping log this tick"),
+        for (path, key) in paths.iter().zip(&keys) {
+            match self.tail(path, report).await {
+                Ok(changed) => {
+                    dirty |= changed;
+                    if self.log_notes.clear(key) {
+                        tracing::info!(file = %key, "readable again");
+                    }
+                }
+                Err(err) => {
+                    if self.log_notes.report(key, err.to_string()) {
+                        tracing::warn!(file = %key, %err, "skipping log until this changes");
+                    }
+                }
             }
         }
         (dirty, count)
@@ -1004,19 +1161,31 @@ impl Daemon {
 
     async fn harvest_docs(&mut self, dir: &Path, report: &mut TickReport) -> (bool, usize) {
         let paths = match harvest::scan(dir) {
-            Ok(paths) => paths,
+            Ok(paths) => {
+                if self.harvest_scan.clear() {
+                    tracing::info!(dir = %dir.display(), "harvest directory is readable again");
+                }
+                paths
+            }
             Err(err) => {
-                tracing::warn!(dir = %dir.display(), %err, "cannot scan harvest directory");
+                if self.harvest_scan.report(err.to_string()) {
+                    tracing::warn!(dir = %dir.display(), %err, "cannot scan harvest directory; staying quiet until this changes");
+                }
                 return (false, 0);
             }
         };
         let count = paths.len();
+        let groups = harvest::group(paths);
+        let keys: Vec<String> = groups.iter().map(|group| group.key.clone()).collect();
+        self.harvest_notes.retain(&keys);
         let mut dirty = false;
-        for group in harvest::group(paths) {
+        for group in groups {
             match self.harvest_group(&group, report).await {
                 Ok(changed) => dirty |= changed,
                 Err(err) => {
-                    tracing::warn!(file = %group.key, %err, "skipping harvest file this tick")
+                    if self.harvest_notes.report(&group.key, err.to_string()) {
+                        tracing::warn!(file = %group.key, %err, "skipping harvest file until this changes");
+                    }
                 }
             }
         }
@@ -1043,12 +1212,17 @@ impl Daemon {
 
         if len > harvest::MAX_BYTES {
             report.harvest_skipped += 1;
-            tracing::warn!(
-                file = %file_name,
-                len,
-                limit = harvest::MAX_BYTES,
-                "harvest file is too large to ship, skipping"
-            );
+            if self
+                .harvest_notes
+                .report(&file_name, format!("too large: {len}"))
+            {
+                tracing::warn!(
+                    file = %file_name,
+                    len,
+                    limit = harvest::MAX_BYTES,
+                    "harvest file is too large to ship, skipping until it changes"
+                );
+            }
             return Ok(false);
         }
         let hash = content_hash(&contents.concat());
@@ -1078,10 +1252,18 @@ impl Daemon {
                 Ok(doc) => docs.push(doc),
                 Err(err) => {
                     report.parse_failures += 1;
-                    tracing::warn!(file = %file_name, %err, "harvest file is not json yet, retrying next tick");
+                    if self
+                        .harvest_notes
+                        .report(&file_name, format!("not json: {err}"))
+                    {
+                        tracing::warn!(file = %file_name, %err, "harvest file is not json yet, retrying quietly each tick");
+                    }
                     return Ok(false);
                 }
             }
+        }
+        if self.harvest_notes.clear(&file_name) {
+            tracing::info!(file = %file_name, "harvest file is readable again");
         }
 
         let upload = HarvestDoc {
@@ -1197,6 +1379,55 @@ mod tests {
             last_status: status,
             uploaded_at: Some(mtime),
         }
+    }
+
+    #[test]
+    fn the_reader_is_fetched_once_and_then_backed_off_never_retried_per_tick() {
+        let now = std::time::Instant::now();
+        let step = |asked, installed, auto, next| install_step(asked, installed, auto, next, now);
+
+        assert_eq!(step(true, false, true, None), InstallStep::Go);
+        assert_eq!(
+            step(false, false, true, None),
+            InstallStep::NotWanted,
+            "nothing asked for the reader"
+        );
+        assert_eq!(
+            step(true, true, true, None),
+            InstallStep::NotWanted,
+            "it is already there"
+        );
+        assert_eq!(
+            step(true, false, false, None),
+            InstallStep::Off,
+            "the user turned it off"
+        );
+        assert_eq!(
+            step(true, false, true, Some(now + Duration::from_secs(60))),
+            InstallStep::Waiting,
+            "a failed install does not retry on the very next tick"
+        );
+        assert_eq!(
+            step(true, false, true, Some(now - Duration::from_secs(1))),
+            InstallStep::Go,
+            "once the backoff has run out it tries again"
+        );
+        assert_eq!(
+            step(true, true, false, Some(now + Duration::from_secs(60))),
+            InstallStep::NotWanted,
+            "being installed beats every other reason"
+        );
+    }
+
+    #[test]
+    fn the_install_backoff_climbs_from_a_minute_to_an_hour() {
+        let mut backoff = Backoff::with_max(INSTALL_RETRY, INSTALL_RETRY_MAX);
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            waits.push(backoff.delay().as_secs());
+            backoff.fail();
+        }
+        assert_eq!(waits, vec![60, 120, 240, 480, 960, 1920, 3600, 3600]);
     }
 
     #[test]
