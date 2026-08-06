@@ -80,6 +80,9 @@ pub struct SkinConfig {
     pub name: Option<String>,
     #[serde(default = "default_skin_check_secs")]
     pub check_secs: u64,
+    #[serde(default)]
+    pub export: bool,
+    pub screen: Option<(i32, i32)>,
 }
 
 impl SkinConfig {

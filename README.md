@@ -42,6 +42,7 @@ enabled = false             # keep the in-game EQLD button applied
 [skin]
 enabled = false             # keep the installed skin up to date
 layout = "dorskui"
+export = false              # push the in-game arrangement back up as a layout
 ```
 
 | Key | Default | What |
@@ -121,7 +122,26 @@ The subcommands are one-shots and are not locked; only the daemon loop is.
 enabled = true
 layout = "dorskui"
 # name = "v4"
+export = true               # also send the in-game arrangement back
+# screen = [1280, 720]      # only if eqclient.ini cannot be trusted
 ```
+
+`layout` is the channel: it is both the layout installed into the game and the
+one whose window sizes the export is measured against. Changing it in the
+config switches channels on the next tick, without a restart.
+
+With `export = true` each tick reads `UI_<Character>_<server>_LO1.ini`, hashes
+the geometry of the tracked windows only — chat routing and bag positions churn
+constantly and must not count — and uploads on change as
+`<character>-<server>-<W>x<H>-<YYYYmmdd-HHMMSS>`. No change, no upload. The
+render size comes from `eqclient.ini` (`WindowedWidth`/`WindowedHeight`, else
+`Width`/`Height`); `screen` overrides it.
+
+Export only reads, so it runs whether or not the client is up. The client
+rewrites that ini as it exits, which is the edge the hash is waiting for — so a
+session's rearranging lands one tick after you quit. A skin install is adopted
+as already-seen, so installing does not bounce straight back up as a new
+layout.
 
 `install-skin` is a one-shot you run by hand. `[skin] enabled = true` puts the
 same work on the daemon's tick, which matters where typing a command line is

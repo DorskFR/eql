@@ -265,6 +265,24 @@ mod tests {
         generate_bundle(layout, "dorskui", TEMPLATE_WIDTH, TEMPLATE_HEIGHT).unwrap()
     }
 
+    fn phone_layout() -> Layout {
+        Layout(BTreeMap::from([
+            ("BuffWindow".to_string(), (0, 0, 780, 150)),
+            ("ShortDurationBuffWindow".to_string(), (790, 0, 490, 150)),
+            ("PlayerWindow".to_string(), (0, 160, 300, 130)),
+            ("PetInfoWindow".to_string(), (0, 300, 300, 110)),
+            ("TargetWindow".to_string(), (980, 160, 300, 130)),
+            ("ExtendedTargetWnd".to_string(), (980, 300, 300, 110)),
+            ("CastSpellWnd".to_string(), (0, 430, 350, 140)),
+            ("CastingWindow".to_string(), (360, 430, 330, 60)),
+            ("GroupWindow".to_string(), (700, 430, 280, 140)),
+            ("Chat 1".to_string(), (990, 430, 290, 140)),
+            ("HotButtonWnd".to_string(), (0, 580, 350, 140)),
+            ("HotButtonWnd2".to_string(), (360, 580, 350, 140)),
+            ("MainChat".to_string(), (720, 580, 560, 140)),
+        ]))
+    }
+
     #[test]
     fn every_default_layout_window_is_mapped() {
         let layout = default_layout();
@@ -284,6 +302,45 @@ mod tests {
                 assert!(XML_FILES.iter().any(|(name, _)| name == file));
             }
         }
+    }
+
+    #[test]
+    fn a_generated_ini_reads_back_as_the_layout_that_made_it() {
+        for (layout, w, h) in [
+            (default_layout(), TEMPLATE_WIDTH, TEMPLATE_HEIGHT),
+            (phone_layout(), 1280, 720),
+        ] {
+            let files = generate_bundle(&layout, "dorskui", w, h).unwrap();
+            let ini = bundle_map(&files)[INI_NAME];
+            let sizes = layout
+                .rects()
+                .map(|(name, rect)| (name.to_string(), (rect.w, rect.h)))
+                .collect();
+            assert_eq!(
+                eql_core::layout::from_ui_ini(ini, w, h, &sizes),
+                layout,
+                "{w}x{h} did not survive the round trip"
+            );
+        }
+    }
+
+    /// Anchors in the wild are a mix of left/center/right; the fixture the
+    /// generator ships is uniform, so this pins the ones it does not write.
+    #[test]
+    fn anchors_the_generator_never_writes_do_not_move_a_window() {
+        let sizes = BTreeMap::from([("PlayerWindow".to_string(), (300, 130))]);
+        let read = |xref: &str, yref: &str| {
+            eql_core::layout::from_ui_ini(
+                &format!(
+                    "[PlayerWindow]\r\nXRef={xref}\r\nYRef={yref}\r\nXPos=25.000000%\r\nYPos=50.000000%\r\nWidth=300\r\nHeight=130\r\n"
+                ),
+                1280,
+                720,
+                &sizes,
+            )
+        };
+        assert_eq!(read("left", "top"), read("center", "bottom"));
+        assert_eq!(read("left", "top"), read("right", "center"));
     }
 
     #[test]

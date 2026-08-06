@@ -106,6 +106,7 @@ pub struct TickReport {
     pub fights: usize,
     pub socials: usize,
     pub skins: usize,
+    pub exports: usize,
 }
 
 /// Whether the client owns its files right now. `Undetectable` is not a
@@ -196,6 +197,8 @@ pub struct Daemon {
     config_watch: Option<crate::config::Watch>,
     socials_note: Notice,
     skin_note: Notice,
+    export_note: Notice,
+    export_sizes: Option<(String, crate::export::WindowSizes)>,
     root_scan: Notice,
     log_scan: Notice,
     harvest_scan: Notice,
@@ -206,6 +209,7 @@ pub struct Daemon {
     install_backoff: Backoff,
     next_install: Option<std::time::Instant>,
     last_skin_check: Option<std::time::Instant>,
+    last_export_check: Option<std::time::Instant>,
 }
 
 impl Daemon {
@@ -288,6 +292,8 @@ impl Daemon {
             config_watch: None,
             socials_note: Notice::new(),
             skin_note: Notice::new(),
+            export_note: Notice::new(),
+            export_sizes: None,
             root_scan: Notice::new(),
             log_scan: Notice::new(),
             harvest_scan: Notice::new(),
@@ -298,6 +304,7 @@ impl Daemon {
             install_backoff: Backoff::with_max(INSTALL_RETRY, INSTALL_RETRY_MAX),
             next_install: None,
             last_skin_check: None,
+            last_export_check: None,
         })
     }
 
@@ -664,6 +671,136 @@ impl Daemon {
         }
     }
 
+    /// Read-only, so unlike the skin install this runs whether or not the
+    /// client is up: the client only rewrites the UI ini as it exits, which is
+    /// exactly the edge the digest is watching for.
+    async fn sync_exports(&mut self, root: &Path, report: &mut TickReport) -> bool {
+        let settings = self.config.skin.clone();
+        if !settings.export {
+            self.export_note.clear();
+            self.last_export_check = None;
+            return false;
+        }
+        let Some(channel) = settings
+            .layout
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        else {
+            self.note_export("[skin] export is on but no layout is named to size it against");
+            return false;
+        };
+        if self
+            .last_export_check
+            .is_some_and(|at| at.elapsed() < settings.check_interval())
+        {
+            return false;
+        }
+        self.last_export_check = Some(std::time::Instant::now());
+
+        let Some(screen) = settings.screen.or_else(|| crate::export::resolution(root)) else {
+            self.note_export(&crate::export::ExportError::NoResolution.to_string());
+            return false;
+        };
+        if !matches!(&self.export_sizes, Some((named, _)) if named == channel) {
+            match crate::export::sizes_for(&self.config, channel).await {
+                Ok(sizes) => self.export_sizes = Some((channel.to_string(), sizes)),
+                Err(err) => {
+                    self.note_export(&format!("cannot read the {channel} layout: {err}"));
+                    return false;
+                }
+            }
+        }
+        let Some((_, sizes)) = self.export_sizes.clone() else {
+            return false;
+        };
+
+        let now = unix_secs(SystemTime::now()).unwrap_or_default();
+        let mut dirty = false;
+        let mut notes = Vec::new();
+        for (character, server) in crate::socials::characters(root) {
+            let key = format!("{character}_{server}");
+            let export = match crate::export::read(root, &character, &server, &sizes, screen, now) {
+                Ok(Some(export)) => export,
+                Ok(None) => continue,
+                Err(err) => {
+                    notes.push(err.to_string());
+                    continue;
+                }
+            };
+            if self
+                .state
+                .exports
+                .get(&key)
+                .is_some_and(|seen| seen.digest == export.digest)
+            {
+                continue;
+            }
+            match crate::export::upload(&self.config, &export).await {
+                Ok(problems) => {
+                    report.exports += 1;
+                    dirty = true;
+                    self.state.exports.insert(
+                        key,
+                        crate::state::ExportState {
+                            digest: export.digest.clone(),
+                            name: Some(export.name.clone()),
+                            exported_at: Some(now),
+                        },
+                    );
+                    tracing::info!(
+                        layout = %export.name,
+                        screen = %format!("{}x{}", export.screen_w, export.screen_h),
+                        windows = export.layout.0.len(),
+                        problems = problems.len(),
+                        "exported the in-game layout"
+                    );
+                }
+                Err(err) => notes.push(err.to_string()),
+            }
+        }
+        match notes.is_empty() {
+            true => {
+                self.export_note.clear();
+            }
+            false => self.note_export(&notes.join("; ")),
+        }
+        dirty
+    }
+
+    /// The skin install writes the very ini the exporter watches. Without
+    /// adopting that write as already-seen, every install would bounce straight
+    /// back up as a fresh timestamped layout.
+    fn seed_exports(&mut self, root: &Path) {
+        if !self.config.skin.export {
+            return;
+        }
+        let Some((_, sizes)) = self.export_sizes.clone() else {
+            return;
+        };
+        let now = unix_secs(SystemTime::now()).unwrap_or_default();
+        for (character, server) in crate::socials::characters(root) {
+            let path = crate::export::ui_ini_path(root, &character, &server);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            self.state.exports.insert(
+                format!("{character}_{server}"),
+                crate::state::ExportState {
+                    digest: crate::export::geometry_digest(&text, &sizes),
+                    name: None,
+                    exported_at: Some(now),
+                },
+            );
+        }
+    }
+
+    fn note_export(&mut self, note: &str) {
+        if self.export_note.report(note) {
+            tracing::info!(note, "layout not exported");
+        }
+    }
+
     fn note_socials(&mut self, note: &str) {
         if self.socials_note.report(note) {
             tracing::info!(note, "in-game social not applied");
@@ -731,6 +868,7 @@ impl Daemon {
             Ok(installed) => {
                 report.skins += 1;
                 self.skin_note.clear();
+                self.seed_exports(root);
                 self.state.skin = Some(SkinState {
                     layout: args.layout.clone(),
                     name: args.skin.clone(),
@@ -849,6 +987,7 @@ impl Daemon {
         let game = self.look_at_game();
         self.install_socials(&root, game, &mut report);
         dirty_state |= self.sync_skin(&root, game, &mut report).await;
+        dirty_state |= self.sync_exports(&root, &mut report).await;
         self.supervise_overlays(&root, game).await;
 
         let mut harvest_files = None;
