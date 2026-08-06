@@ -11,6 +11,7 @@
 		DataTable,
 		EmptyState,
 		Heading,
+		Icon,
 		Link,
 		Metric,
 		Progress,
@@ -38,6 +39,14 @@
 		type ZoneRow
 	} from '$lib/harvest';
 	import { describeEvent, eventTone } from '$lib/events';
+	import {
+		type AbilityRow,
+		categoryTone,
+		clock,
+		enemyList,
+		type FightRow,
+		projectFights
+	} from '$lib/fights';
 	import { bags, filled, groupEntries, paperdoll } from '$lib/inventory';
 	import {
 		ATTRIBUTES,
@@ -51,7 +60,7 @@
 		weaponDamageDelay,
 		weaponRatio
 	} from '$lib/items';
-	import { useEvents, useHarvest, useInventory, useStats } from '$lib/queries';
+	import { useEvents, useFights, useHarvest, useInventory, useStats } from '$lib/queries';
 
 	const server = $derived(page.params.server ?? '');
 	const name = $derived(page.params.name ?? '');
@@ -78,6 +87,18 @@
 			0
 		)
 	);
+
+	const fightPages = useFights(
+		() => server,
+		() => name
+	);
+
+	const fights = $derived(projectFights(fightPages.data?.pages.flat()));
+	const openFights = new SvelteSet<string>();
+
+	function toggleFight(key: string) {
+		if (!openFights.delete(key)) openFights.add(key);
+	}
 
 	const atlasDoc = useHarvest(
 		() => server,
@@ -189,6 +210,29 @@
 		}
 	];
 
+	const abilityColumns: Column<AbilityRow>[] = [
+		{ key: 'name', label: 'Ability', sortable: true },
+		{ key: 'category', label: 'Type' },
+		{
+			key: 'total',
+			label: 'Damage',
+			align: 'right',
+			sortable: true,
+			get: (row) => count(row.total)
+		},
+		{ key: 'share', label: 'Share of fight' },
+		{ key: 'hits', label: 'Hits', align: 'right', sortable: true },
+		{ key: 'crits', label: 'Crits', align: 'right', sortable: true },
+		{
+			key: 'average',
+			label: 'Average',
+			align: 'right',
+			sortable: true,
+			get: (row) => rate(row.average)
+		},
+		{ key: 'biggest', label: 'Biggest', align: 'right', sortable: true }
+	];
+
 	const eventColumns: Column<LogEvent>[] = [
 		{ key: 'at', label: 'When' },
 		{ key: 'kind', label: 'Event' },
@@ -263,6 +307,7 @@
 		{ id: 'general', label: `General (${general.length})`, icon: 'archive' },
 		{ id: 'bank', label: `Bank (${bank.length})`, icon: 'lock' },
 		{ id: 'events', label: 'Events', icon: 'clock' },
+		{ id: 'fights', label: 'Fights', icon: 'list' },
 		{ id: 'atlas', label: 'Atlas', icon: 'grid' },
 		{ id: 'quests', label: 'Quests', icon: 'bookmark' },
 		{ id: 'alltime', label: 'Lifetime', icon: 'live' }
@@ -381,6 +426,8 @@
 							{@render statsPanel()}
 						{:else if id === 'events'}
 							{@render eventsPanel()}
+						{:else if id === 'fights'}
+							{@render fightsPanel()}
 						{:else if id === 'atlas'}
 							{@render atlasPanel()}
 						{:else if id === 'quests'}
@@ -621,6 +668,204 @@
 
 {#snippet eventKind(event: LogEvent)}
 	<Badge tone={eventTone(event)} size="sm">{event.kind}</Badge>
+{/snippet}
+
+{#snippet abilityType(row: AbilityRow)}
+	<Cluster gap="var(--sp-1)">
+		{#if row.category}
+			<Badge tone={categoryTone(row.category)} size="sm">{row.category}</Badge>
+		{:else}
+			<Text tone="faint" variant="caption">—</Text>
+		{/if}
+		{#if row.proc}
+			<Badge tone="neutral" size="sm">proc</Badge>
+		{/if}
+	</Cluster>
+{/snippet}
+
+{#snippet abilityShare(row: AbilityRow)}
+	<Cluster gap="var(--sp-2)" wrap={false}>
+		<Progress value={row.share * 100} max={100} size="sm" tone="accent" />
+		<Text variant="caption" tone="muted">{percent(row.share)}</Text>
+	</Cluster>
+{/snippet}
+
+{#snippet fightDetail(row: FightRow)}
+	<Stack gap="var(--sp-3)">
+		<Cluster gap="var(--sp-2)">
+			{#if row.stance}
+				<Badge tone="info" size="sm">stance · {row.stance}</Badge>
+			{/if}
+			{#if row.invocation}
+				<Badge tone="info" size="sm">invocation · {row.invocation}</Badge>
+			{/if}
+			{#if !row.stance && !row.invocation}
+				<Text variant="caption" tone="faint">No stance or invocation recorded.</Text>
+			{/if}
+		</Cluster>
+
+		<AutoGrid min="9rem">
+			<Metric label="Damage out" value={count(row.dmg_out)} icon="live" tone="info" sub="{rate(row.dps)} dps" />
+			<Metric
+				label="Damage taken"
+				value={count(row.dmg_in)}
+				icon="heart"
+				tone="danger"
+				sub="{rate(row.taken_per_sec)} per second"
+			/>
+			<Metric label="Healing done" value={count(row.heal_out)} icon="check-circle" tone="ok" />
+			<Metric label="Kills" value={row.kills} icon="star" tone="ok" sub="{row.deaths} deaths" />
+			<Metric
+				label="Duration"
+				value={clock(row.span)}
+				icon="clock"
+				sub="{clock(row.active_secs)} active"
+			/>
+		</AutoGrid>
+
+		<Stack gap="var(--sp-1)">
+			<Text variant="caption" tone="faint">Fought</Text>
+			<Text variant="caption">{enemyList(row.enemies)}</Text>
+			{#if row.allies.length}
+				<Text variant="caption" tone="faint">Alongside {row.allies.join(', ')}</Text>
+			{/if}
+		</Stack>
+
+		{#if row.abilities.length}
+			<Card padding="none">
+				<DataTable
+					columns={abilityColumns}
+					rows={row.abilities}
+					rowKey={(ability) => ability.key}
+					cellSnippets={{ category: abilityType, share: abilityShare }}
+					empty="No damage broken down."
+				/>
+			</Card>
+		{:else}
+			<Text variant="caption" tone="faint">
+				No damage of yours landed in this fight, so there is nothing to break down.
+			</Text>
+		{/if}
+
+		{#if row.casts.length}
+			<Stack gap="var(--sp-2)">
+				<Text variant="caption" tone="faint">Spells cast</Text>
+				<Cluster gap="var(--sp-2)">
+					{#each row.casts as cast (cast.key)}
+						<Badge size="sm" tone={cast.resists ? 'warn' : 'neutral'}>
+							{cast.name} ×{cast.casts}{cast.resists ? ` · ${cast.resists} resisted` : ''}
+						</Badge>
+					{/each}
+				</Cluster>
+			</Stack>
+		{/if}
+	</Stack>
+{/snippet}
+
+{#snippet fightCard(row: FightRow)}
+	{@const open = openFights.has(row.key)}
+	<Card padding="none">
+		<button
+			type="button"
+			class="fight-head"
+			aria-expanded={open}
+			onclick={() => toggleFight(row.key)}
+		>
+			<span class="fight-when">
+				<Timestamp value={row.at} mode="datetime" />
+				<span class="fight-zone">{row.zone ?? 'zone unknown'}</span>
+			</span>
+			<span class="fight-foes">{enemyList(row.enemies)}</span>
+			<span class="fight-figures">
+				<span class="fight-fig"><b>{count(row.dmg_out)}</b> out</span>
+				<span class="fight-fig"><b>{count(row.dmg_in)}</b> in</span>
+				<span class="fight-fig"><b>{rate(row.dps)}</b> dps</span>
+				<span class="fight-fig"><b>{row.kills}</b> kills</span>
+				{#if row.deaths}
+					<span class="fight-fig fight-bad"><b>{row.deaths}</b> deaths</span>
+				{/if}
+				<span class="fight-fig">{clock(row.span)}</span>
+			</span>
+			<Icon name={open ? "chevron-up" : "chevron-down"} />
+		</button>
+		{#if open}
+			<div class="fight-body">{@render fightDetail(row)}</div>
+		{/if}
+	</Card>
+{/snippet}
+
+{#snippet fightsPanel()}
+	{#if fightPages.isPending}
+		<Card>
+			<Cluster gap="var(--sp-2)">
+				<Spinner />
+				<Text tone="muted">Loading fights…</Text>
+			</Cluster>
+		</Card>
+	{:else if fightPages.isError}
+		<EmptyState
+			title="No fight history"
+			description={fightPages.error.message}
+			icon="alert-circle"
+			tone="warn"
+			actionLabel="Retry"
+			onAction={() => fightPages.refetch()}
+		/>
+	{:else if !fights.usable}
+		<EmptyState
+			title="No fights recorded yet"
+			description="Fights are cut from the log by the EQL Log Reader combat tracker — switch on [tools.log_reader] in eqld and they appear as you play."
+			icon="list"
+		/>
+	{:else}
+		<Stack gap="var(--sp-3)">
+			<Text variant="caption" tone="faint">
+				One encounter per row, newest first. A fight starts on the first damage and ends after 45
+				seconds with none; rates use active seconds only, so idle time between pulls is not counted
+				against you.
+			</Text>
+
+			<AutoGrid min="10rem">
+				<Metric label="Fights" value={fights.totals.fights} icon="list" />
+				<Metric label="Damage out" value={count(fights.totals.dmg_out)} icon="live" tone="info" />
+				<Metric label="DPS" value={rate(fights.totals.dps)} icon="star" tone="ok" sub="while active" />
+				<Metric
+					label="Damage taken"
+					value={count(fights.totals.dmg_in)}
+					icon="heart"
+					tone="danger"
+				/>
+				<Metric label="Healing done" value={count(fights.totals.heal_out)} icon="check-circle" />
+				<Metric
+					label="Kills"
+					value={fights.totals.kills}
+					icon="check-circle"
+					tone="ok"
+					sub="{fights.totals.deaths} deaths"
+				/>
+			</AutoGrid>
+
+			<Stack gap="var(--sp-2)">
+				{#each fights.fights as row (row.key)}
+					{@render fightCard(row)}
+				{/each}
+			</Stack>
+
+			<Cluster justify="space-between">
+				<Text variant="caption" tone="faint">{fights.fights.length} fights</Text>
+				{#if fightPages.hasNextPage}
+					<Button
+						variant="ghost"
+						size="sm"
+						loading={fightPages.isFetchingNextPage}
+						onclick={() => fightPages.fetchNextPage()}
+					>
+						Load older
+					</Button>
+				{/if}
+			</Cluster>
+		</Stack>
+	{/if}
 {/snippet}
 
 {#snippet harvestState(
@@ -1175,5 +1420,68 @@
 
 	.eq-tabpanel {
 		padding-top: var(--sp-2, 0.5rem);
+	}
+
+	.fight-head {
+		width: 100%;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--sp-2, 0.5rem) var(--sp-3, 0.75rem);
+		padding: var(--sp-3, 0.75rem);
+		background: none;
+		border: 0;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.fight-head:hover,
+	.fight-head:focus-visible {
+		background: var(--surface-2, rgba(255, 255, 255, 0.04));
+	}
+
+	.fight-when {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		min-width: 0;
+	}
+
+	.fight-zone {
+		font-size: 0.75rem;
+		color: var(--text-muted, #8a8470);
+	}
+
+	.fight-foes {
+		flex: 1 1 12rem;
+		min-width: 0;
+		font-size: 0.8rem;
+		color: var(--text-muted, #8a8470);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.fight-figures {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem 0.75rem;
+		font-size: 0.8rem;
+		color: var(--text-muted, #8a8470);
+	}
+
+	.fight-fig b {
+		color: var(--text, inherit);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.fight-bad b {
+		color: var(--danger, #e05252);
+	}
+
+	.fight-body {
+		padding: 0 var(--sp-3, 0.75rem) var(--sp-3, 0.75rem);
 	}
 </style>

@@ -164,6 +164,13 @@ export interface LogEvent {
 	payload: LogEventPayload;
 }
 
+export interface FightView {
+	id: number;
+	started_at: string;
+	start_wall: number;
+	fight: unknown;
+}
+
 export type HarvestKind = 'atlas' | 'quest' | 'alltime';
 
 export interface HarvestDoc {
@@ -261,6 +268,13 @@ export const endpoints = {
 		if (before) query.set('before', before);
 		return get<LogEvent[]>(
 			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/events?${query}`
+		);
+	},
+	fights: (server: string, name: string, limit: number, before?: string) => {
+		const query = new URLSearchParams({ limit: String(limit) });
+		if (before) query.set('before', before);
+		return get<FightView[]>(
+			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/fights?${query}`
 		);
 	},
 	harvest: (server: string, name: string, kind: HarvestKind) =>

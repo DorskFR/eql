@@ -3,6 +3,7 @@ pub mod config;
 #[cfg(windows)]
 pub mod ctrl;
 pub mod daemon;
+pub mod fights;
 pub mod harvest;
 #[cfg(windows)]
 pub mod hidden;

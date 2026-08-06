@@ -14,6 +14,10 @@ pub const ATLAS_STEM: &str = "eql_atlas";
 /// absent from a stock upstream install.
 pub const HEADLESS_STEM: &str = "eql_headless";
 
+/// The patched tool that dumps a log's completed fights as JSON; absent from
+/// a stock upstream install.
+pub const FIGHTS_STEM: &str = "eql_fights_cli";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Runner {
     Frozen(PathBuf),
@@ -40,6 +44,19 @@ impl Runner {
     pub fn overlay_args(&self, log: &Path) -> Vec<PathBuf> {
         let mut args = self.leading_args();
         args.push(log.to_path_buf());
+        args
+    }
+
+    pub fn fights_args(&self, log: &Path, out: &Path, since: Option<&str>) -> Vec<PathBuf> {
+        let mut args = self.leading_args();
+        args.push(log.to_path_buf());
+        args.push(PathBuf::from("--out"));
+        args.push(out.to_path_buf());
+        if let Some(since) = since {
+            args.push(PathBuf::from("--since"));
+            args.push(PathBuf::from(since));
+        }
+        args.push(PathBuf::from("--quiet"));
         args
     }
 
@@ -153,9 +170,25 @@ pub async fn replay_all(runner: &Runner, logs: &[PathBuf], timeout: Duration) ->
 
 pub async fn replay(runner: &Runner, log: &Path, timeout: Duration) -> Result<(), ReplayError> {
     let started = Instant::now();
+    run(runner, runner.replay_args(log), timeout).await?;
+    tracing::debug!(log = %log.display(), ms = started.elapsed().as_millis(), "replayed");
+    Ok(())
+}
+
+pub async fn fights(
+    runner: &Runner,
+    log: &Path,
+    out: &Path,
+    since: Option<&str>,
+    timeout: Duration,
+) -> Result<(), ReplayError> {
+    run(runner, runner.fights_args(log, out, since), timeout).await
+}
+
+async fn run(runner: &Runner, args: Vec<PathBuf>, timeout: Duration) -> Result<(), ReplayError> {
     let mut command = tokio::process::Command::new(runner.program());
     command
-        .args(runner.replay_args(log))
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -175,7 +208,6 @@ pub async fn replay(runner: &Runner, log: &Path, timeout: Duration) -> Result<()
     if !status.success() {
         return Err(ReplayError::Exit(status.code()));
     }
-    tracing::debug!(log = %log.display(), ms = started.elapsed().as_millis(), "replayed");
     Ok(())
 }
 
@@ -269,6 +301,45 @@ mod tests {
             vec![
                 PathBuf::from("/src/eql_dps_meter.py"),
                 PathBuf::from("/logs/a.txt")
+            ]
+        );
+    }
+
+    #[test]
+    fn the_fights_dump_carries_its_output_path_and_its_watermark() {
+        let frozen = Runner::Frozen(PathBuf::from("/opt/eql/eql_fights_cli.exe"));
+        assert_eq!(
+            frozen.fights_args(
+                Path::new("/logs/a.txt"),
+                Path::new("/state/fights/eql_fights_Dorsk_erudin.json"),
+                None
+            ),
+            vec![
+                PathBuf::from("/logs/a.txt"),
+                PathBuf::from("--out"),
+                PathBuf::from("/state/fights/eql_fights_Dorsk_erudin.json"),
+                PathBuf::from("--quiet"),
+            ]
+        );
+
+        let source = Runner::Source {
+            python: PathBuf::from("/usr/bin/python3"),
+            script: PathBuf::from("/src/eql_fights_cli.py"),
+        };
+        assert_eq!(
+            source.fights_args(
+                Path::new("/logs/a.txt"),
+                Path::new("/out.json"),
+                Some("1785931338.000")
+            ),
+            vec![
+                PathBuf::from("/src/eql_fights_cli.py"),
+                PathBuf::from("/logs/a.txt"),
+                PathBuf::from("--out"),
+                PathBuf::from("/out.json"),
+                PathBuf::from("--since"),
+                PathBuf::from("1785931338.000"),
+                PathBuf::from("--quiet"),
             ]
         );
     }

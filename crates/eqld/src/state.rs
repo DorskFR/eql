@@ -11,6 +11,18 @@ pub struct State {
     pub harvest: BTreeMap<String, FileState>,
     #[serde(default)]
     pub icons: BTreeMap<String, FileState>,
+    #[serde(default)]
+    pub fights: BTreeMap<String, FightsState>,
+}
+
+/// How far into a log's fight history has been accepted, keyed by log file.
+/// Fights accumulate on the server, so this is the only thing stopping a tick
+/// from re-sending the whole log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FightsState {
+    pub last_start_wall_ms: i64,
+    pub uploaded: usize,
+    pub uploaded_at: Option<i64>,
 }
 
 /// Byte offset already shipped for a tailed log; a file first seen at offset
@@ -139,6 +151,26 @@ mod tests {
 
         std::fs::write(&path, r#"{"files":{}}"#).unwrap();
         assert!(State::load(&path).unwrap().logs.is_empty());
+    }
+
+    #[test]
+    fn fight_watermarks_round_trip_and_predate_state_files_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = sample();
+        state.fights.insert(
+            "eqlog_Dorsk_erudin.txt".into(),
+            FightsState {
+                last_start_wall_ms: 1_785_931_338_000,
+                uploaded: 13,
+                uploaded_at: Some(1_785_931_400),
+            },
+        );
+        state.save(&path).unwrap();
+        assert_eq!(State::load(&path).unwrap(), state);
+
+        std::fs::write(&path, r#"{"files":{}}"#).unwrap();
+        assert!(State::load(&path).unwrap().fights.is_empty());
     }
 
     #[test]

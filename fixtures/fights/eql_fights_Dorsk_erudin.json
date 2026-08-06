@@ -1,0 +1,885 @@
+[
+  {
+    "start_wall": 1785931338.0,
+    "span": 158.0,
+    "active_secs": 158.0,
+    "enemies": [
+      "a greater skeleton",
+      "an ogre guard",
+      "a large skeleton",
+      "a greater skeleton pet",
+      "an ogre guard pet"
+    ],
+    "allies": [],
+    "dmg_out_you": 7654,
+    "dmg_in_you": 3142,
+    "heal_out": 2166,
+    "kills": 5,
+    "deaths": 1,
+    "stance": "Mage Hunter Stance",
+    "invocation": "Spellblade",
+    "abilities_dmg": {
+      "Melee": {
+        "total": 4322,
+        "hits": 116,
+        "crits": 10,
+        "biggest": 185,
+        "category": "melee",
+        "proc": false
+      },
+      "Reaving Strike": {
+        "total": 700,
+        "hits": 8,
+        "crits": 0,
+        "biggest": 96,
+        "category": "poison",
+        "proc": false
+      },
+      "Lifedraw": {
+        "total": 997,
+        "hits": 10,
+        "crits": 0,
+        "biggest": 109,
+        "category": "spell",
+        "proc": false
+      },
+      "Poison Storm": {
+        "total": 466,
+        "hits": 8,
+        "crits": 0,
+        "biggest": 61,
+        "category": "spell",
+        "proc": false
+      },
+      "Kick": {
+        "total": 986,
+        "hits": 25,
+        "crits": 0,
+        "biggest": 80,
+        "category": "skill",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Poison Storm": 4,
+      "Envenomed Breath": 1,
+      "Lifedraw": 7,
+      "Spirit of Cat": 1,
+      "Protect": 1,
+      "Spirit of Snake": 1
+    },
+    "spell_resists": {},
+    "zone": "Najena 4 (Refined)"
+  },
+  {
+    "start_wall": 1785931682.0,
+    "span": 393.0,
+    "active_secs": 281.0,
+    "enemies": [
+      "a large skeleton",
+      "an ogre guard",
+      "a greater skeleton",
+      "a greater skeleton pet",
+      "an ogre guard pet"
+    ],
+    "allies": [],
+    "dmg_out_you": 8503,
+    "dmg_in_you": 2824,
+    "heal_out": 2737,
+    "kills": 7,
+    "deaths": 0,
+    "stance": "Defense Stance",
+    "invocation": "Inversion",
+    "abilities_dmg": {
+      "Kick": {
+        "total": 1449,
+        "hits": 48,
+        "crits": 5,
+        "biggest": 100,
+        "category": "skill",
+        "proc": false
+      },
+      "Melee": {
+        "total": 4592,
+        "hits": 219,
+        "crits": 19,
+        "biggest": 190,
+        "category": "melee",
+        "proc": false
+      },
+      "Reaving Strike": {
+        "total": 1280,
+        "hits": 15,
+        "crits": 0,
+        "biggest": 96,
+        "category": "poison",
+        "proc": false
+      },
+      "Vampiric Embrace": {
+        "total": 266,
+        "hits": 7,
+        "crits": 0,
+        "biggest": 38,
+        "category": "spell",
+        "proc": false
+      },
+      "Lifedraw": {
+        "total": 916,
+        "hits": 9,
+        "crits": 0,
+        "biggest": 109,
+        "category": "spell",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Walking Sleep": 6,
+      "Quickness": 1,
+      "Snails Healing": 1,
+      "Healing": 2,
+      "Lifedraw": 11
+    },
+    "spell_resists": {},
+    "zone": "Najena 4 (Refined)"
+  },
+  {
+    "start_wall": 1785932330.0,
+    "span": 1.0,
+    "active_secs": 0.0,
+    "enemies": [
+      "A tormented dead",
+      "an Undead Annalkeeper"
+    ],
+    "allies": [],
+    "dmg_out_you": 0,
+    "dmg_in_you": 5,
+    "heal_out": 0,
+    "kills": 0,
+    "deaths": 0,
+    "stance": "Defense Stance",
+    "invocation": "Inversion",
+    "abilities_dmg": {},
+    "spell_casts": {},
+    "spell_resists": {},
+    "zone": "Nektulos Forest"
+  },
+  {
+    "start_wall": 1785933427.0,
+    "span": 295.0,
+    "active_secs": 205.0,
+    "enemies": [
+      "a death beetle",
+      "a tormented dead",
+      "A death beetle",
+      "A tormented dead",
+      "a jack o lantern"
+    ],
+    "allies": [
+      [
+        "Morveus",
+        133
+      ]
+    ],
+    "dmg_out_you": 973,
+    "dmg_in_you": 698,
+    "heal_out": 24,
+    "kills": 3,
+    "deaths": 1,
+    "stance": "Defense Stance",
+    "invocation": "Arcane Mastery",
+    "abilities_dmg": {
+      "Pet: Cleave": {
+        "total": 12,
+        "hits": 2,
+        "crits": 0,
+        "biggest": 8,
+        "category": "pet",
+        "proc": false
+      },
+      "Shock of Ice": {
+        "total": 281,
+        "hits": 6,
+        "crits": 0,
+        "biggest": 51,
+        "category": "spell",
+        "proc": false
+      },
+      "Pet: Harm Touch": {
+        "total": 5,
+        "hits": 1,
+        "crits": 0,
+        "biggest": 5,
+        "category": "pet",
+        "proc": false
+      },
+      "Pet: Lifetap": {
+        "total": 36,
+        "hits": 6,
+        "crits": 0,
+        "biggest": 6,
+        "category": "pet",
+        "proc": false
+      },
+      "Pet: Melee": {
+        "total": 76,
+        "hits": 9,
+        "crits": 0,
+        "biggest": 14,
+        "category": "pet",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Shock of Ice": 7,
+      "Column of Frost": 8,
+      "Numbing Cold": 8,
+      "Icestrike": 9,
+      "Lifespike": 1
+    },
+    "spell_resists": {
+      "Column of Frost": 2
+    },
+    "zone": "The Estate of Unrest"
+  },
+  {
+    "start_wall": 1785933823.0,
+    "span": 75.0,
+    "active_secs": 75.0,
+    "enemies": [
+      "a greater skeleton",
+      "a death beetle",
+      "A death beetle"
+    ],
+    "allies": [
+      [
+        "Morveus",
+        73
+      ]
+    ],
+    "dmg_out_you": 512,
+    "dmg_in_you": 55,
+    "heal_out": 0,
+    "kills": 1,
+    "deaths": 0,
+    "stance": "Channeler",
+    "invocation": "Inversion",
+    "abilities_dmg": {
+      "Column of Frost": {
+        "total": 29,
+        "hits": 1,
+        "crits": 0,
+        "biggest": 29,
+        "category": "spell",
+        "proc": false
+      },
+      "Shock of Ice": {
+        "total": 477,
+        "hits": 10,
+        "crits": 0,
+        "biggest": 51,
+        "category": "spell",
+        "proc": false
+      },
+      "Melee": {
+        "total": 6,
+        "hits": 2,
+        "crits": 0,
+        "biggest": 5,
+        "category": "melee",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Shock of Ice": 11,
+      "O`Keil's Embers": 1
+    },
+    "spell_resists": {},
+    "zone": "The Estate of Unrest"
+  },
+  {
+    "start_wall": 1785934072.0,
+    "span": 23.0,
+    "active_secs": 23.0,
+    "enemies": [
+      "a tormented dead",
+      "a greater skeleton",
+      "Ghilanbiddle Nylwadil",
+      "Elmion Hendrys",
+      "A greater skeleton"
+    ],
+    "allies": [
+      [
+        "Morveus",
+        217
+      ]
+    ],
+    "dmg_out_you": 162,
+    "dmg_in_you": 30,
+    "heal_out": 0,
+    "kills": 2,
+    "deaths": 0,
+    "stance": "Defense Stance",
+    "invocation": "Inversion",
+    "abilities_dmg": {
+      "Shock of Ice": {
+        "total": 74,
+        "hits": 2,
+        "crits": 0,
+        "biggest": 51,
+        "category": "spell",
+        "proc": false
+      },
+      "Pet: Harm Touch": {
+        "total": 52,
+        "hits": 1,
+        "crits": 0,
+        "biggest": 52,
+        "category": "pet",
+        "proc": false
+      },
+      "Icestrike": {
+        "total": 64,
+        "hits": 4,
+        "crits": 0,
+        "biggest": 16,
+        "category": "spell",
+        "proc": false
+      },
+      "Pet: Lifetap": {
+        "total": 12,
+        "hits": 2,
+        "crits": 0,
+        "biggest": 6,
+        "category": "pet",
+        "proc": false
+      },
+      "Numbing Cold": {
+        "total": 23,
+        "hits": 2,
+        "crits": 0,
+        "biggest": 14,
+        "category": "spell",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Icestrike": 1,
+      "Numbing Cold": 2,
+      "Column of Frost": 1,
+      "Shock of Ice": 1
+    },
+    "spell_resists": {},
+    "zone": "The Estate of Unrest"
+  },
+  {
+    "start_wall": 1785958927.0,
+    "span": 106.0,
+    "active_secs": 106.0,
+    "enemies": [
+      "a faerie royal guard"
+    ],
+    "allies": [],
+    "dmg_out_you": 601,
+    "dmg_in_you": 410,
+    "heal_out": 185,
+    "kills": 1,
+    "deaths": 0,
+    "stance": null,
+    "invocation": "Divine",
+    "abilities_dmg": {
+      "Shock of Ice": {
+        "total": 477,
+        "hits": 10,
+        "crits": 0,
+        "biggest": 51,
+        "category": "spell",
+        "proc": false
+      },
+      "Damage Shield (flames)": {
+        "total": 111,
+        "hits": 37,
+        "crits": 0,
+        "biggest": 3,
+        "category": "ds",
+        "proc": false
+      },
+      "Melee": {
+        "total": 1,
+        "hits": 1,
+        "crits": 0,
+        "biggest": 1,
+        "category": "melee",
+        "proc": false
+      },
+      "Pet: Lifetap": {
+        "total": 30,
+        "hits": 5,
+        "crits": 0,
+        "biggest": 6,
+        "category": "pet",
+        "proc": false
+      },
+      "Lifespike": {
+        "total": 12,
+        "hits": 1,
+        "crits": 0,
+        "biggest": 12,
+        "category": "spell",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Shock of Ice": 13,
+      "Despair": 1,
+      "Lesser Shielding": 1,
+      "O`Keil's Embers": 2,
+      "Leering Corpse": 1,
+      "Lifespike": 1
+    },
+    "spell_resists": {
+      "Shock of Ice": 1
+    },
+    "zone": "The Greater Faydark"
+  },
+  {
+    "start_wall": 1785959085.0,
+    "span": 192.0,
+    "active_secs": 157.0,
+    "enemies": [
+      "an orc conscript",
+      "a faerie noble",
+      "an orc witchdoctor",
+      "an orc footman",
+      "Zoner"
+    ],
+    "allies": [],
+    "dmg_out_you": 1125,
+    "dmg_in_you": 217,
+    "heal_out": 55,
+    "kills": 8,
+    "deaths": 0,
+    "stance": null,
+    "invocation": "Arcane Mastery",
+    "abilities_dmg": {
+      "Shock of Ice": {
+        "total": 513,
+        "hits": 12,
+        "crits": 0,
+        "biggest": 51,
+        "category": "spell",
+        "proc": false
+      },
+      "Pet: Melee": {
+        "total": 184,
+        "hits": 19,
+        "crits": 0,
+        "biggest": 14,
+        "category": "pet",
+        "proc": false
+      },
+      "Pet: Lifetap": {
+        "total": 54,
+        "hits": 9,
+        "crits": 0,
+        "biggest": 6,
+        "category": "pet",
+        "proc": false
+      },
+      "Melee": {
+        "total": 5,
+        "hits": 2,
+        "crits": 0,
+        "biggest": 3,
+        "category": "melee",
+        "proc": false
+      },
+      "Pet: Cleave": {
+        "total": 90,
+        "hits": 11,
+        "crits": 0,
+        "biggest": 14,
+        "category": "pet",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Shock of Ice": 12,
+      "Column of Frost": 7,
+      "Icestrike": 4,
+      "Numbing Cold": 3
+    },
+    "spell_resists": {
+      "Icestrike": 1,
+      "Column of Frost": 1
+    },
+    "zone": "The Greater Faydark"
+  },
+  {
+    "start_wall": 1785959414.0,
+    "span": 116.0,
+    "active_secs": 116.0,
+    "enemies": [
+      "Orc Warden",
+      "orc slaver",
+      "Rondo Dunfire",
+      "Orc slaver",
+      "an elven slave"
+    ],
+    "allies": [],
+    "dmg_out_you": 1278,
+    "dmg_in_you": 380,
+    "heal_out": 0,
+    "kills": 7,
+    "deaths": 0,
+    "stance": null,
+    "invocation": "Arcane Mastery",
+    "abilities_dmg": {
+      "Pet: Disease Cloud": {
+        "total": 6,
+        "hits": 2,
+        "crits": 0,
+        "biggest": 5,
+        "category": "pet",
+        "proc": false
+      },
+      "Pet: Melee": {
+        "total": 30,
+        "hits": 4,
+        "crits": 0,
+        "biggest": 14,
+        "category": "pet",
+        "proc": false
+      },
+      "Pet: Cleave": {
+        "total": 37,
+        "hits": 3,
+        "crits": 0,
+        "biggest": 14,
+        "category": "pet",
+        "proc": false
+      },
+      "Pet: Harm Touch": {
+        "total": 16,
+        "hits": 1,
+        "crits": 0,
+        "biggest": 16,
+        "category": "pet",
+        "proc": false
+      },
+      "Column of Frost": {
+        "total": 506,
+        "hits": 19,
+        "crits": 0,
+        "biggest": 29,
+        "category": "spell",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Column of Frost": 9,
+      "Icestrike": 8,
+      "Shock of Ice": 6,
+      "Numbing Cold": 4
+    },
+    "spell_resists": {
+      "Column of Frost": 1
+    },
+    "zone": "Clan Crushbone"
+  },
+  {
+    "start_wall": 1785959707.0,
+    "span": 388.0,
+    "active_secs": 366.0,
+    "enemies": [
+      "orc centurion",
+      "orc scoutsman",
+      "Orc centurion",
+      "orc slaver",
+      "orc legionnaire"
+    ],
+    "allies": [],
+    "dmg_out_you": 2534,
+    "dmg_in_you": 728,
+    "heal_out": 364,
+    "kills": 12,
+    "deaths": 0,
+    "stance": "Balanced",
+    "invocation": "Divine",
+    "abilities_dmg": {
+      "Shock of Ice": {
+        "total": 548,
+        "hits": 14,
+        "crits": 0,
+        "biggest": 51,
+        "category": "spell",
+        "proc": false
+      },
+      "Column of Frost": {
+        "total": 1069,
+        "hits": 41,
+        "crits": 0,
+        "biggest": 29,
+        "category": "spell",
+        "proc": false
+      },
+      "Icestrike": {
+        "total": 409,
+        "hits": 26,
+        "crits": 0,
+        "biggest": 16,
+        "category": "spell",
+        "proc": false
+      },
+      "Numbing Cold": {
+        "total": 151,
+        "hits": 11,
+        "crits": 0,
+        "biggest": 14,
+        "category": "spell",
+        "proc": false
+      },
+      "Damage Shield (flames)": {
+        "total": 285,
+        "hits": 95,
+        "crits": 0,
+        "biggest": 3,
+        "category": "ds",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Column of Frost": 20,
+      "Icestrike": 14,
+      "Numbing Cold": 4,
+      "Shock of Ice": 15,
+      "O`Keil's Embers": 4
+    },
+    "spell_resists": {
+      "Column of Frost": 1,
+      "Icestrike": 1,
+      "Numbing Cold": 1
+    },
+    "zone": "Clan Crushbone"
+  },
+  {
+    "start_wall": 1785960172.0,
+    "span": 195.0,
+    "active_secs": 186.0,
+    "enemies": [
+      "orc centurion",
+      "orc taskmaster",
+      "orc legionnaire",
+      "Orc centurion",
+      "Orc taskmaster"
+    ],
+    "allies": [],
+    "dmg_out_you": 1261,
+    "dmg_in_you": 359,
+    "heal_out": 0,
+    "kills": 5,
+    "deaths": 0,
+    "stance": "Balanced",
+    "invocation": "Arcane Mastery",
+    "abilities_dmg": {
+      "Shock of Ice": {
+        "total": 456,
+        "hits": 11,
+        "crits": 0,
+        "biggest": 51,
+        "category": "spell",
+        "proc": false
+      },
+      "Damage Shield (flames)": {
+        "total": 51,
+        "hits": 17,
+        "crits": 0,
+        "biggest": 3,
+        "category": "ds",
+        "proc": false
+      },
+      "Column of Frost": {
+        "total": 487,
+        "hits": 18,
+        "crits": 0,
+        "biggest": 29,
+        "category": "spell",
+        "proc": false
+      },
+      "Icestrike": {
+        "total": 256,
+        "hits": 16,
+        "crits": 0,
+        "biggest": 16,
+        "category": "spell",
+        "proc": false
+      },
+      "Melee": {
+        "total": 11,
+        "hits": 3,
+        "crits": 0,
+        "biggest": 8,
+        "category": "melee",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Shock of Ice": 13,
+      "Column of Frost": 10,
+      "Icestrike": 6,
+      "Leering Corpse": 1
+    },
+    "spell_resists": {},
+    "zone": "Clan Crushbone"
+  },
+  {
+    "start_wall": 1785960439.0,
+    "span": 374.0,
+    "active_secs": 345.0,
+    "enemies": [
+      "orc centurion",
+      "an orc thaumaturgist",
+      "Orc centurion",
+      "orc slaver",
+      "Orc slaver"
+    ],
+    "allies": [],
+    "dmg_out_you": 2293,
+    "dmg_in_you": 794,
+    "heal_out": 406,
+    "kills": 9,
+    "deaths": 0,
+    "stance": "Balanced",
+    "invocation": "Divine",
+    "abilities_dmg": {
+      "Melee": {
+        "total": 104,
+        "hits": 15,
+        "crits": 2,
+        "biggest": 22,
+        "category": "melee",
+        "proc": false
+      },
+      "Damage Shield (flames)": {
+        "total": 483,
+        "hits": 161,
+        "crits": 0,
+        "biggest": 3,
+        "category": "ds",
+        "proc": false
+      },
+      "Shock of Ice": {
+        "total": 609,
+        "hits": 14,
+        "crits": 0,
+        "biggest": 51,
+        "category": "spell",
+        "proc": false
+      },
+      "Column of Frost": {
+        "total": 671,
+        "hits": 26,
+        "crits": 0,
+        "biggest": 29,
+        "category": "spell",
+        "proc": false
+      },
+      "Icestrike": {
+        "total": 339,
+        "hits": 22,
+        "crits": 0,
+        "biggest": 16,
+        "category": "spell",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "O`Keil's Embers": 5,
+      "Shock of Ice": 16,
+      "Column of Frost": 17,
+      "Icestrike": 8,
+      "Numbing Cold": 3,
+      "Leering Corpse": 1
+    },
+    "spell_resists": {
+      "Column of Frost": 3,
+      "Icestrike": 1
+    },
+    "zone": "Clan Crushbone"
+  },
+  {
+    "start_wall": 1785960884.0,
+    "span": 218.0,
+    "active_secs": 196.0,
+    "enemies": [
+      "a faerie courtier",
+      "an orc footman",
+      "an orc centurion",
+      "an orc seer",
+      "an orc witchdoctor"
+    ],
+    "allies": [],
+    "dmg_out_you": 1153,
+    "dmg_in_you": 368,
+    "heal_out": 24,
+    "kills": 5,
+    "deaths": 0,
+    "stance": "Balanced",
+    "invocation": "Recover",
+    "abilities_dmg": {
+      "Column of Frost": {
+        "total": 368,
+        "hits": 14,
+        "crits": 0,
+        "biggest": 29,
+        "category": "spell",
+        "proc": false
+      },
+      "Icestrike": {
+        "total": 172,
+        "hits": 11,
+        "crits": 0,
+        "biggest": 16,
+        "category": "spell",
+        "proc": false
+      },
+      "Numbing Cold": {
+        "total": 98,
+        "hits": 7,
+        "crits": 0,
+        "biggest": 14,
+        "category": "spell",
+        "proc": false
+      },
+      "Damage Shield (flames)": {
+        "total": 198,
+        "hits": 66,
+        "crits": 0,
+        "biggest": 3,
+        "category": "ds",
+        "proc": false
+      },
+      "Lifespike": {
+        "total": 12,
+        "hits": 1,
+        "crits": 0,
+        "biggest": 12,
+        "category": "spell",
+        "proc": false
+      }
+    },
+    "spell_casts": {
+      "Column of Frost": 7,
+      "Icestrike": 3,
+      "Numbing Cold": 2,
+      "O`Keil's Embers": 4,
+      "Lifespike": 1,
+      "Shock of Ice": 7,
+      "Leering Corpse": 3
+    },
+    "spell_resists": {
+      "Column of Frost": 3,
+      "Icestrike": 1
+    },
+    "zone": "The Greater Faydark"
+  }
+]

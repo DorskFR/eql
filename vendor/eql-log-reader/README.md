@@ -18,15 +18,22 @@ lifetime stats and quest credit both needed its tkinter GUI on screen.
 |---|---|
 | `eql_headless.py` | new — the DPS meter's `open_log`/`poll`/`quit_app` driven by a plain loop, no tkinter. Writes the same `eql_alltime_*.json`. |
 | `eql_quest_cli.py` | new — `list \| search \| add \| track \| remove \| move \| have` against the tracked-quest list. |
+| `eql_fights_cli.py` | new — every completed fight of a log as JSON, from `CombatTracker.fight_listeners`, with the zone each one started in. |
 | `eql_dps_meter.py` | 5 lines: `--headless` dispatches to `eql_headless`. |
 | `eql_atlas.py` | `attach_quest_layer()`, called from `replay()`, plus a `--quest` verb. |
-| `eql_suite.spec` | builds the two new tools. `console=True` for both — a windowed PyInstaller exe has no valid stdout on Windows, so a headless tool built that way is mute. `hiddenimports` because both are reached only through in-function imports. |
-| `packaging/linux/*` | the two new files in the runtime file lists. |
+| `eql_suite.spec` | builds the three new tools. `console=True` for all three — a windowed PyInstaller exe has no valid stdout on Windows, so a headless tool built that way is mute. `hiddenimports` for the two reached only through in-function imports. |
+| `packaging/linux/*` | the three new files in the runtime file lists. |
 | `tools/compare_*.sh` | the harnesses that proved headless output equals the GUI's. |
 
 `eql_headless.py` mirrors `run_overlay`'s `open_log` / `poll` / `quit_app` and
 names them with their upstream line numbers in its docstring; those three
 functions are what to re-read on every upstream bump.
+
+`eql_fights_cli.py` reads fights off `CombatTracker.fight_listeners`, never off
+`CombatTracker.history`: history is wiped at every `Welcome to EverQuest
+Legends!` banner and capped at `MAX_FIGHT_HISTORY`, so a log whose last session
+is a few lines long has none. It also skips the fight still in progress at EOF —
+emitting it would emit it again later, changed, under the same `start_wall`.
 
 ## Applying
 

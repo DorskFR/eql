@@ -95,6 +95,192 @@ index e061fcb..2fa135d 100644
      else:
          try:
              s = Settings(SETTINGS_FILE)
+diff --git a/eql_fights_cli.py b/eql_fights_cli.py
+new file mode 100644
+index 0000000..c381eaa
+--- /dev/null
++++ b/eql_fights_cli.py
+@@ -0,0 +1,180 @@
++#!/usr/bin/env python3
++"""
++EQL Fights CLI
++==============
++Emits every COMPLETED fight in a log as JSON, using the same CombatTracker
++the DPS meter and the Session Report's Encounters tab run on.
++
++    python eql_fights_cli.py <eqlog file> [--out PATH] [--since UNIX]
++                             [--indent N] [--quiet]
++
++Output is `{"character","server","log","fights":[...]}`; without --out it
++goes to stdout. Each fight carries the tracker's own numbers plus the zone
++it started in, which the Fight object does not know: zones come from the
++client's "You have entered <zone>." lines, interleaved by log timestamp.
++
++CombatTracker.history cannot be used for this: it is wiped at every
++"Welcome to EverQuest Legends!" banner and keeps only MAX_FIGHT_HISTORY
++fights, so a log whose last session is a handful of lines has an empty
++history. fight_listeners fires once per fight as it closes, which is every
++fight in the file regardless of session boundaries.
++
++A fight still in progress at the end of the log is NOT emitted -- it would
++be emitted again, with different numbers and the same start_wall, on the
++next run. maybe_timeout() closes it once real time has moved past the idle
++timeout, which is the same rule the live overlay applies.
++"""
++
++import json
++import os
++import re
++import sys
++from datetime import datetime
++
++from eql_combat_tracker import CombatTracker, LOG_TS_FMT, TS_RE
++from eql_spell_db import SPELL_DB
++
++ZONE_RE = re.compile(TS_RE + r"You have entered (?P<zone>.+)\.\s*$")
++NAME_RE = re.compile(r"eqlog_(?P<character>.+)_(?P<server>[^_]+)\.txt$", re.I)
++
++
++def char_server(log_path):
++    m = NAME_RE.search(os.path.basename(log_path))
++    return (m.group("character"), m.group("server")) if m else ("You", "")
++
++
++def _stamp(line):
++    m = re.match(TS_RE, line)
++    if not m:
++        return None
++    try:
++        return datetime.strptime(m.group("ts"), LOG_TS_FMT).timestamp()
++    except ValueError:
++        return None
++
++
++class Zones:
++    """Zone in effect at a given instant, from the log's own zone-in lines."""
++
++    def __init__(self):
++        self.changes = []
++
++    def feed(self, line):
++        m = ZONE_RE.match(line)
++        if not m:
++            return
++        at = _stamp(line)
++        if at is not None:
++            self.changes.append((at, m.group("zone")))
++
++    def at(self, wall_time):
++        zone = None
++        for at, name in self.changes:
++            if at > wall_time:
++                break
++            zone = name
++        return zone
++
++
++def as_record(fight, zone):
++    you = fight.actors.get("You") or {}
++    return {
++        "start_wall": fight.start_wall,
++        "zone": zone,
++        "span": fight.span(),
++        "active_secs": round(fight.active_secs, 1),
++        "enemies": [name for name, _ in fight.enemies()],
++        "allies": fight.allies(),
++        "dmg_out_you": you.get("dmg_out") or 0,
++        "dmg_in_you": you.get("dmg_in") or 0,
++        "heal_out": fight.total_heal_out(),
++        "kills": fight.kills,
++        "deaths": fight.deaths,
++        "stance": fight.main_stance(),
++        "invocation": fight.main_invocation(),
++        "abilities_dmg": fight.abilities_dmg,
++        "spell_casts": fight.spell_casts,
++        "spell_resists": fight.spell_resists,
++    }
++
++
++def collect(log_path, since=None):
++    character, server = char_server(log_path)
++    SPELL_DB.set_game_dir_hint(
++        os.path.dirname(os.path.dirname(os.path.abspath(log_path))))
++    tracker = CombatTracker(self_name=character)
++    zones = Zones()
++    fights = []
++    tracker.fight_listeners.append(
++        lambda fight: fights.append(as_record(fight, zones.at(fight.start_wall))))
++    # eql_atlas.ingest's decoding, and it leaves a half-written trailing line
++    buf = b""
++    with open(log_path, "rb") as fh:
++        while True:
++            chunk = fh.read(1 << 20)
++            if not chunk:
++                break
++            *lines, buf = (buf + chunk).split(b"\n")
++            for raw in lines:
++                line = raw.decode("cp1252", "replace").rstrip("\r")
++                zones.feed(line)
++                tracker.handle_line(line)
++    tracker.maybe_timeout()
++    if since is not None:
++        fights = [f for f in fights if f["start_wall"] > since]
++    fights.sort(key=lambda f: f["start_wall"])
++    return {"character": character, "server": server,
++            "log": os.path.abspath(log_path), "fights": fights}
++
++
++def run(log_path, out=None, since=None, indent=None, verbose=True):
++    result = collect(log_path, since)
++    text = json.dumps(result, indent=indent, default=str)
++    if not out:
++        print(text)
++        return result
++    directory = os.path.dirname(os.path.abspath(out))
++    if directory:
++        os.makedirs(directory, exist_ok=True)
++    tmp = out + ".tmp"
++    with open(tmp, "w", encoding="utf-8") as fh:
++        fh.write(text)
++    os.replace(tmp, out)
++    if verbose:
++        print(f"[eql-fights] {len(result['fights'])} fight(s) -> {out}",
++              flush=True)
++    return result
++
++
++def main(argv):
++    log_path = ""
++    out = None
++    since = None
++    indent = None
++    verbose = True
++    i = 0
++    while i < len(argv):
++        a = argv[i]
++        if a == "--out":
++            i += 1
++            out = argv[i]
++        elif a == "--since":
++            i += 1
++            since = float(argv[i])
++        elif a == "--indent":
++            i += 1
++            indent = int(argv[i])
++        elif a == "--quiet":
++            verbose = False
++        elif not log_path:
++            log_path = a
++        i += 1
++    if not log_path or not os.path.isfile(log_path):
++        raise SystemExit(
++            "usage: python eql_fights_cli.py <eqlog file> [--out PATH] "
++            "[--since UNIX] [--indent N] [--quiet]")
++    run(log_path, out=out, since=since, indent=indent, verbose=verbose)
++
++
++if __name__ == "__main__":
++    main(sys.argv[1:])
 diff --git a/eql_headless.py b/eql_headless.py
 new file mode 100644
 index 0000000..8176e0f
@@ -423,7 +609,7 @@ index 0000000..54568c1
 +if __name__ == "__main__":
 +    main(sys.argv[1:])
 diff --git a/eql_suite.spec b/eql_suite.spec
-index 75d6926..f6989ac 100644
+index 75d6926..e7cf936 100644
 --- a/eql_suite.spec
 +++ b/eql_suite.spec
 @@ -31,7 +31,16 @@ import os
@@ -432,11 +618,11 @@ index 75d6926..f6989ac 100644
  TOOLS = ["eql_launcher", "eql_friend_overlay", "eql_dps_meter",
 -         "eql_session_report", "eql_atlas"]
 +         "eql_session_report", "eql_atlas",
-+         "eql_headless", "eql_quest_cli"]
++         "eql_headless", "eql_quest_cli", "eql_fights_cli"]
 +
-+# these two are stdout-driven, so they must be console subsystem binaries;
++# these are stdout-driven, so they must be console subsystem binaries;
 +# everything else stays windowed
-+CONSOLE_TOOLS = {"eql_headless", "eql_quest_cli"}
++CONSOLE_TOOLS = {"eql_headless", "eql_quest_cli", "eql_fights_cli"}
 +
 +# reachable only through lazy in-function imports (eql_dps_meter.main's
 +# --headless, eql_atlas.main's --quest)
@@ -465,27 +651,28 @@ index 75d6926..f6989ac 100644
      )
      exes.append(exe)
 diff --git a/packaging/linux/build_appimage.sh b/packaging/linux/build_appimage.sh
-index 62c0b56..79f3d8a 100644
+index 62c0b56..a00742b 100644
 --- a/packaging/linux/build_appimage.sh
 +++ b/packaging/linux/build_appimage.sh
 @@ -36,6 +36,7 @@ VERSION="$(sed -n 's/^CURRENT_VERSION = "\([^"]*\)"/\1/p' \
  
  RUNTIME_FILES="eql_launcher.py eql_friend_overlay.py eql_dps_meter.py
  eql_session_report.py eql_atlas.py eql_atlas_map.py eql_quest.py
-+eql_headless.py eql_quest_cli.py
++eql_headless.py eql_quest_cli.py eql_fights_cli.py
  eql_overlay_common.py eql_combat_tracker.py eql_spell_db.py
  eql_verified_spells.py eql_update_check.py eql_atlas_baseline.json.gz
  eql_quest_db.json.gz icon.png LICENSE README.md RELEASE_NOTES.md"
 diff --git a/packaging/linux/build_linux_packages.py b/packaging/linux/build_linux_packages.py
-index 4419f5c..309cfb5 100644
+index 4419f5c..c81b352 100644
 --- a/packaging/linux/build_linux_packages.py
 +++ b/packaging/linux/build_linux_packages.py
-@@ -39,7 +39,8 @@ OUT = os.path.join(ROOT, "Output")
+@@ -39,7 +39,9 @@ OUT = os.path.join(ROOT, "Output")
  RUNTIME_FILES = [
      "eql_launcher.py", "eql_friend_overlay.py", "eql_dps_meter.py",
      "eql_session_report.py", "eql_atlas.py", "eql_atlas_map.py",
 -    "eql_quest.py", "eql_overlay_common.py", "eql_combat_tracker.py",
 +    "eql_quest.py", "eql_headless.py", "eql_quest_cli.py",
++    "eql_fights_cli.py",
 +    "eql_overlay_common.py", "eql_combat_tracker.py",
      "eql_spell_db.py", "eql_verified_spells.py", "eql_update_check.py",
      "eql_atlas_baseline.json.gz", "eql_quest_db.json.gz",
