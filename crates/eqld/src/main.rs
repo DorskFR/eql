@@ -1,8 +1,13 @@
-use eqld::{config::Config, daemon::Daemon, icons, install, skin};
+use eqld::{config::Config, daemon::Daemon, icons, install, skin, socials};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
-const SUBCOMMANDS: &[&str] = &["install-skin", "install-tools", "upload-icons"];
+const SUBCOMMANDS: &[&str] = &[
+    "install-skin",
+    "install-social",
+    "install-tools",
+    "upload-icons",
+];
 
 /// `eqld [config.toml] [subcommand [args…]]` — the optional leading config path
 /// is anything that is not a subcommand name.
@@ -32,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(subcommand) = rest.first() {
         return match subcommand.as_str() {
             "install-skin" => Ok(skin::run(&config, &rest[1..]).await?),
+            "install-social" => Ok(socials::run(&config, &rest[1..])?),
             "install-tools" => Ok(install::run(&config, &rest[1..]).await?),
             "upload-icons" => Ok(icons::run(&config, &rest[1..]).await?),
             other => Err(format!("unknown subcommand {other:?}").into()),

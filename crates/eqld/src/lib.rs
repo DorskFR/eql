@@ -12,6 +12,7 @@ pub mod install;
 pub mod logs;
 pub mod overlays;
 pub mod skin;
+pub mod socials;
 pub mod state;
 pub mod tools;
 

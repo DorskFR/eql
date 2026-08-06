@@ -82,6 +82,15 @@ export interface CharacterSummary {
 	snapshot_count: number;
 }
 
+export interface CharacterView {
+	name: string;
+	server: string;
+	level: number | null;
+	race: string | null;
+	classes: string[];
+	identity_at: string | null;
+}
+
 export interface InventoryView {
 	character: string;
 	server: string;
@@ -143,7 +152,14 @@ export interface StatsView {
 	equipped: InventoryEntry[];
 }
 
-export type LogEventKind = 'loot' | 'level' | 'zone' | 'death' | 'location' | 'skill';
+export type LogEventKind =
+	| 'loot'
+	| 'level'
+	| 'zone'
+	| 'death'
+	| 'location'
+	| 'skill'
+	| 'who';
 
 export interface LogEventPayload {
 	item?: string;
@@ -155,6 +171,8 @@ export interface LogEventPayload {
 	y?: number;
 	x?: number;
 	z?: number;
+	classes?: string[];
+	race?: string;
 }
 
 export interface LogEvent {
@@ -255,6 +273,10 @@ async function authed<T>(
 
 export const endpoints = {
 	characters: () => get<CharacterSummary[]>('/api/v1/characters'),
+	character: (server: string, name: string) =>
+		get<CharacterView>(
+			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}`
+		),
 	inventory: (server: string, name: string) =>
 		get<InventoryView>(
 			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/inventory`

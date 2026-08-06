@@ -7,6 +7,7 @@ const FIGHT_PAGE = 50;
 
 export const qk = {
 	characters: ['characters'] as const,
+	character: (server: string, name: string) => ['character', server, name] as const,
 	inventory: (server: string, name: string) => ['inventory', server, name] as const,
 	stats: (server: string, name: string) => ['stats', server, name] as const,
 	events: (server: string, name: string) => ['events', server, name] as const,
@@ -23,6 +24,14 @@ export const useCharacters = () =>
 		queryKey: qk.characters,
 		queryFn: endpoints.characters,
 		refetchInterval: REFETCH_MS
+	}));
+
+export const useCharacter = (server: () => string, name: () => string) =>
+	createQuery(() => ({
+		queryKey: qk.character(server(), name()),
+		queryFn: () => endpoints.character(server(), name()),
+		refetchInterval: REFETCH_MS,
+		retry: false
 	}));
 
 export const useInventory = (server: () => string, name: () => string) =>

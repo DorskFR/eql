@@ -60,7 +60,14 @@
 		weaponDamageDelay,
 		weaponRatio
 	} from '$lib/items';
-	import { useEvents, useFights, useHarvest, useInventory, useStats } from '$lib/queries';
+	import {
+		useCharacter,
+		useEvents,
+		useFights,
+		useHarvest,
+		useInventory,
+		useStats
+	} from '$lib/queries';
 
 	const server = $derived(page.params.server ?? '');
 	const name = $derived(page.params.name ?? '');
@@ -80,13 +87,25 @@
 		() => name
 	);
 
+	const character = useCharacter(
+		() => server,
+		() => name
+	);
+
+	const who = $derived(character.data?.identity_at ? character.data : null);
+	const classes = $derived(who?.classes.join('/') ?? '');
+	const identityLine = $derived(
+		who ? [`Level ${who.level} ${classes}`.trim(), who.race, server].filter(Boolean).join(' · ') : ''
+	);
+
 	const eventRows = $derived(events.data?.pages.flat() ?? []);
-	const level = $derived(
+	const loggedLevel = $derived(
 		eventRows.reduce(
 			(max, event) => (event.kind === 'level' ? Math.max(max, event.payload.level ?? 0) : max),
 			0
 		)
 	);
+	const level = $derived(who?.level ?? loggedLevel);
 
 	const fightPages = useFights(
 		() => server,
@@ -321,6 +340,9 @@
 		<Cluster gap="var(--sp-3)">
 			<Button href="/" variant="ghost" size="sm">Back</Button>
 			<Heading level={2}>{name}</Heading>
+			{#if who}
+				<Badge tone="neutral">Level {who.level} {classes}</Badge>
+			{/if}
 			<Badge tone="info">{server}</Badge>
 		</Cluster>
 		{#if inventory.data}
@@ -353,9 +375,19 @@
 					<div class="eq-panel eq-identity">
 						<div class="eq-name">{name}</div>
 						<div class="eq-sub">
-							{#if level}Level {level} <span class="eq-faint">(from logs)</span> ·{/if}
-							{server}
+							{#if who}
+								{identityLine}
+							{:else if level}
+								Level {level} <span class="eq-faint">(from logs)</span> · {server}
+							{:else}
+								{server}
+							{/if}
 						</div>
+						{#if !who}
+							<div class="eq-faint">
+								Race and class unknown — press the EQLD social in game, or type /who
+							</div>
+						{/if}
 					</div>
 
 					<div class="eq-panel">

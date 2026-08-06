@@ -11,6 +11,14 @@ pub struct Config {
     pub harvest: HarvestConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub socials: SocialsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SocialsConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -201,6 +209,7 @@ impl Config {
             state: self.state.clone(),
             harvest: next.harvest,
             tools: next.tools,
+            socials: next.socials,
         }
     }
 }
@@ -699,6 +708,8 @@ mod tests {
             path = "b.json"
             [harvest]
             enabled = true
+            [socials]
+            enabled = true
             [tools.log_reader]
             enabled = true
             overlays = ["dps", "friend"]
@@ -731,6 +742,40 @@ mod tests {
         assert_eq!(merged.tools.log_reader.overlays, ["dps", "friend"]);
         assert_eq!(merged.tools.log_reader.hidden, ["friend"]);
         assert_eq!(merged.tools.log_reader.atlas, AtlasMode::Overlay);
+        assert!(merged.socials.enabled);
+    }
+
+    #[test]
+    fn the_in_game_social_stays_off_until_it_is_asked_for() {
+        let bare: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            "#,
+        )
+        .unwrap();
+        assert!(!bare.socials.enabled);
+
+        let asked: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [socials]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        assert!(asked.socials.enabled);
+        assert!(
+            bare.frozen_changes(&asked).is_empty(),
+            "it is hot-swappable"
+        );
     }
 
     #[test]

@@ -113,7 +113,57 @@ fn between<'a>(text: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
     (!inner.is_empty()).then_some(inner)
 }
 
-pub fn parse_body(body: &str) -> Option<LogEventKind> {
+const ANONYMOUS: &str = "ANONYMOUS";
+const MAX_CLASSES: usize = 3;
+
+fn class_list(tag: &str) -> Option<Vec<String>> {
+    let classes: Vec<String> = tag.split('/').map(str::to_string).collect();
+    let sane = |class: &String| {
+        (2..=4).contains(&class.len()) && class.bytes().all(|byte| byte.is_ascii_uppercase())
+    };
+    (classes.len() <= MAX_CLASSES && classes.iter().all(sane)).then_some(classes)
+}
+
+/// `/who` lists everyone in the zone; only the row naming the character whose
+/// log this is describes us.
+fn parse_who(body: &str, character: &str) -> Option<LogEventKind> {
+    let end = body.strip_prefix('[')?.find(']')? + 1;
+    let tag = &body[1..end];
+    let rest = body[end + 1..].trim_start();
+    let name = rest.split_whitespace().next()?;
+    if !name.eq_ignore_ascii_case(character) {
+        return None;
+    }
+    if tag == ANONYMOUS {
+        return None;
+    }
+
+    let (level, classes) = tag.split_once(' ')?;
+    let level: u32 = level.parse().ok()?;
+    let classes = class_list(classes)?;
+
+    let after_name = &rest[name.len()..];
+    let described = after_name
+        .split_once("ZONE:")
+        .map_or(after_name, |(before, _)| before);
+    let race = described
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(race, _)| race.trim())
+        .filter(|race| !race.is_empty() && !race.contains('('))
+        .map(str::to_string);
+
+    Some(LogEventKind::Who {
+        level,
+        classes,
+        race,
+    })
+}
+
+pub fn parse_body(body: &str, character: &str) -> Option<LogEventKind> {
+    if body.starts_with('[') {
+        return parse_who(body, character);
+    }
     if let Some(level) = between(body, "You have gained a level! Welcome to level ", "!") {
         return level
             .parse()
@@ -158,9 +208,9 @@ pub fn parse_body(body: &str) -> Option<LogEventKind> {
     None
 }
 
-pub fn parse_line(line: &str) -> Option<LogEvent> {
+pub fn parse_line(line: &str, character: &str) -> Option<LogEvent> {
     let (at, body) = split_timestamp(line.trim_end_matches(['\r', '\n']))?;
-    parse_body(body).map(|kind| LogEvent { at, kind })
+    parse_body(body, character).map(|kind| LogEvent { at, kind })
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -171,7 +221,7 @@ pub struct Harvest {
 
 /// Only whole lines are harvested; the caller advances its byte offset by
 /// `consumed` so a half-written trailing line is re-read next tick.
-pub fn harvest(chunk: &[u8]) -> (Harvest, usize) {
+pub fn harvest(chunk: &[u8], character: &str) -> (Harvest, usize) {
     let Some(last_newline) = chunk.iter().rposition(|byte| *byte == b'\n') else {
         return (Harvest::default(), 0);
     };
@@ -183,7 +233,7 @@ pub fn harvest(chunk: &[u8]) -> (Harvest, usize) {
         if line.trim().is_empty() {
             continue;
         }
-        match parse_line(line) {
+        match parse_line(line, character) {
             Some(event) => harvest.events.push(event),
             None => harvest.dropped += 1,
         }
@@ -196,7 +246,7 @@ mod tests {
     use super::*;
 
     fn kind(line: &str) -> LogEventKind {
-        parse_line(line)
+        parse_line(line, "Dorsk")
             .unwrap_or_else(|| panic!("no event for {line:?}"))
             .kind
     }
@@ -349,6 +399,77 @@ mod tests {
         );
     }
 
+    /// Verbatim from the player's own log, trailing spaces and all.
+    const WHO: &str =
+        "[Wed Aug 05 19:29:24 2026] [15 WAR/DRU/NEC] Morveus (Dark Elf)  ZONE: The Estate of Unrest 2 (unrest_2)  ";
+
+    #[test]
+    fn our_own_who_row_carries_level_race_and_every_class() {
+        assert_eq!(
+            parse_line(WHO, "Morveus").unwrap().kind,
+            LogEventKind::Who {
+                level: 15,
+                classes: vec!["WAR".into(), "DRU".into(), "NEC".into()],
+                race: Some("Dark Elf".into()),
+            }
+        );
+        assert_eq!(parse_line(WHO, "morveus").unwrap().at, 1_785_958_164);
+    }
+
+    #[test]
+    fn a_single_class_and_a_bare_row_still_parse() {
+        assert_eq!(
+            kind("[Tue Jul 21 21:15:23 2026] [50 WAR] Dorsk (Barbarian) <A Guild>  ZONE: Befallen (befallen)"),
+            LogEventKind::Who {
+                level: 50,
+                classes: vec!["WAR".into()],
+                race: Some("Barbarian".into()),
+            }
+        );
+        assert_eq!(
+            kind("[Tue Jul 21 21:15:23 2026] [1 ENC] Dorsk"),
+            LogEventKind::Who {
+                level: 1,
+                classes: vec!["ENC".into()],
+                race: None,
+            }
+        );
+    }
+
+    #[test]
+    fn somebody_elses_row_is_never_mistaken_for_ours() {
+        assert_eq!(parse_line(WHO, "Dorsk"), None);
+        for line in [
+            "[Tue Jul 21 21:15:23 2026] [ANONYMOUS] Dorsk",
+            "[Tue Jul 21 21:15:23 2026] [ANONYMOUS] Dorsk  ZONE: Befallen (befallen)",
+            "[Tue Jul 21 21:15:23 2026] [15 Warrior] Dorsk (Barbarian)",
+            "[Tue Jul 21 21:15:23 2026] [15 WAR/DRU/NEC/ROG] Dorsk (Barbarian)",
+            "[Tue Jul 21 21:15:23 2026] [fifteen WAR] Dorsk (Barbarian)",
+            "[Tue Jul 21 21:15:23 2026] [15WAR] Dorsk (Barbarian)",
+            "[Tue Jul 21 21:15:23 2026] [15 WAR] Dorskly (Barbarian)",
+        ] {
+            assert_eq!(parse_line(line, "Dorsk"), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn only_our_row_survives_a_whole_who_block() {
+        let block = b"[Wed Aug 05 19:29:24 2026] Players in EverQuest Legends:\r\n\
+            [Wed Aug 05 19:29:24 2026] ---------------------------\r\n\
+            [Wed Aug 05 19:29:24 2026] [22 ROG] Duxx (Human)  ZONE: The Estate of Unrest 2 (unrest_2)  \r\n\
+            [Wed Aug 05 19:29:24 2026] [15 WAR/DRU/NEC] Morveus (Dark Elf)  ZONE: The Estate of Unrest 2 (unrest_2)  \r\n\
+            [Wed Aug 05 19:29:24 2026] There is 1 player in EverQuest Legends.\r\n";
+        let (harvest, _) = harvest(block, "Morveus");
+        assert_eq!(
+            harvest.events.iter().map(|e| &e.kind).collect::<Vec<_>>(),
+            vec![&LogEventKind::Who {
+                level: 15,
+                classes: vec!["WAR".into(), "DRU".into(), "NEC".into()],
+                race: Some("Dark Elf".into()),
+            }]
+        );
+    }
+
     #[test]
     fn chatter_and_near_misses_are_not_events() {
         for line in [
@@ -361,26 +482,29 @@ mod tests {
             "You have entered East Commonlands.",
             "",
         ] {
-            assert_eq!(parse_line(line), None, "{line:?}");
+            assert_eq!(parse_line(line, "Dorsk"), None, "{line:?}");
         }
     }
 
     #[test]
     fn timestamps_travel_with_the_event() {
-        let event =
-            parse_line("[Tue Jul 21 21:15:23 2026] You have entered East Commonlands.").unwrap();
+        let event = parse_line(
+            "[Tue Jul 21 21:15:23 2026] You have entered East Commonlands.",
+            "Dorsk",
+        )
+        .unwrap();
         assert_eq!(event.at, 1_784_668_523);
     }
 
     #[test]
     fn a_trailing_partial_line_is_left_for_the_next_tick() {
         let chunk = b"[Tue Jul 21 21:15:23 2026] You died.\n[Tue Jul 21 21:15:24 2026] You have en";
-        let (first, consumed) = harvest(chunk);
+        let (first, consumed) = harvest(chunk, "Dorsk");
         assert_eq!(consumed, 37);
         assert_eq!(first.events.len(), 1);
         assert_eq!(first.events[0].kind, LogEventKind::Death { killer: None });
 
-        let (nothing, consumed) = harvest(b"no newline yet");
+        let (nothing, consumed) = harvest(b"no newline yet", "Dorsk");
         assert_eq!(consumed, 0);
         assert_eq!(nothing, Harvest::default());
     }
@@ -391,7 +515,7 @@ mod tests {
             [Tue Jul 21 21:15:24 2026] Dorsk says, 'hi'\n\
             plain line without a timestamp\n\
             \n";
-        let (harvest, consumed) = harvest(chunk);
+        let (harvest, consumed) = harvest(chunk, "Dorsk");
         assert_eq!(consumed, chunk.len());
         assert_eq!(harvest.events.len(), 1);
         assert_eq!(harvest.dropped, 2);
@@ -402,7 +526,7 @@ mod tests {
         let mut chunk = b"[Tue Jul 21 21:15:23 2026] You have looted a caf".to_vec();
         chunk.push(0xff);
         chunk.extend_from_slice(b".--\n[Tue Jul 21 21:15:24 2026] You died.\n");
-        let (harvest, consumed) = harvest(&chunk);
+        let (harvest, consumed) = harvest(&chunk, "Dorsk");
         assert_eq!(consumed, chunk.len());
         assert_eq!(harvest.events.len(), 1);
         assert_eq!(harvest.events[0].kind, LogEventKind::Death { killer: None });

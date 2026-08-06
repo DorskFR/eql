@@ -69,6 +69,12 @@ pub enum LogEventKind {
         skill: String,
         value: u32,
     },
+    Who {
+        level: u32,
+        classes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        race: Option<String>,
+    },
 }
 
 impl LogEventKind {
@@ -80,6 +86,7 @@ impl LogEventKind {
             LogEventKind::Death { .. } => "death",
             LogEventKind::Location { .. } => "location",
             LogEventKind::Skill { .. } => "skill",
+            LogEventKind::Who { .. } => "who",
         }
     }
 }
@@ -207,6 +214,16 @@ mod tests {
             LogEventKind::Skill {
                 skill: "Meditate".into(),
                 value: 7,
+            },
+            LogEventKind::Who {
+                level: 15,
+                classes: vec!["WAR".into(), "DRU".into(), "NEC".into()],
+                race: Some("Dark Elf".into()),
+            },
+            LogEventKind::Who {
+                level: 1,
+                classes: vec!["WAR".into()],
+                race: None,
             },
         ];
         for kind in kinds {

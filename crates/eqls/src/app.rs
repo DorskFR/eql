@@ -67,6 +67,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
 
     let api = Router::new()
         .route("/api/v1/characters", get(list_characters))
+        .route("/api/v1/characters/{server}/{name}", get(get_character))
         .route(
             "/api/v1/characters/{server}/{name}/events",
             get(list_events),
@@ -268,6 +269,19 @@ async fn ingest_events(
     .bind(&payloads)
     .execute(&mut *tx)
     .await?;
+    if let Some((at, level, classes, race)) = newest_identity(&batch.events) {
+        sqlx::query(
+            "update characters set level = $2, classes = $3, race = $4, identity_at = $5 \
+             where id = $1 and (identity_at is null or identity_at <= $5)",
+        )
+        .bind(character_id)
+        .bind(level)
+        .bind(&classes)
+        .bind(&race)
+        .bind(at)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     tracing::info!(
@@ -283,6 +297,32 @@ async fn ingest_events(
             events: batch.events.len(),
         }),
     ))
+}
+
+type Identity = (OffsetDateTime, i32, Vec<String>, Option<String>);
+
+/// A batch can replay an old `/who`; the newest row in it wins, and the update
+/// itself refuses to go backwards.
+fn newest_identity(events: &[eql_core::api::LogEvent]) -> Option<Identity> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            LogEventKind::Who {
+                level,
+                classes,
+                race,
+            } => {
+                let at = OffsetDateTime::from_unix_timestamp(event.at).ok()?;
+                Some((
+                    at,
+                    i32::try_from(*level).ok()?,
+                    classes.clone(),
+                    race.clone(),
+                ))
+            }
+            _ => None,
+        })
+        .max_by_key(|(at, ..)| *at)
 }
 
 /// The kind tag rides in its own column, so it is stripped from the payload.
@@ -629,6 +669,43 @@ struct CharacterSummary {
     #[serde(with = "time::serde::rfc3339::option")]
     last_snapshot_at: Option<OffsetDateTime>,
     snapshot_count: i64,
+}
+
+#[derive(Serialize)]
+struct CharacterView {
+    name: String,
+    server: String,
+    level: Option<i32>,
+    race: Option<String>,
+    classes: Vec<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    identity_at: Option<OffsetDateTime>,
+}
+
+async fn get_character(
+    State(state): State<AppState>,
+    Path((server, name)): Path<(String, String)>,
+) -> Result<Json<CharacterView>, AppError> {
+    let row = sqlx::query(
+        "select name, server, level, race, classes, identity_at from characters \
+         where lower(server) = lower($1) and lower(name) = lower($2) limit 1",
+    )
+    .bind(&server)
+    .bind(&name)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    Ok(Json(CharacterView {
+        name: row.try_get("name")?,
+        server: row.try_get("server")?,
+        level: row.try_get("level")?,
+        race: row.try_get("race")?,
+        classes: row
+            .try_get::<Option<Vec<String>>, _>("classes")?
+            .unwrap_or_default(),
+        identity_at: row.try_get("identity_at")?,
+    }))
 }
 
 async fn list_characters(
@@ -1594,6 +1671,93 @@ mod tests {
         })
         .await;
         assert_eq!(unknown.as_array().unwrap().len(), 0);
+    }
+
+    const WHO: &str = r#"{
+        "character": "Morveus",
+        "server": "erudin",
+        "events": [
+            {"at": 1785958164, "kind": "who", "level": 15, "classes": ["WAR", "DRU", "NEC"], "race": "Dark Elf"},
+            {"at": 1785962763, "kind": "who", "level": 16, "classes": ["WAR", "DRU", "NEC"], "race": "Dark Elf"}
+        ]
+    }"#;
+
+    #[test]
+    fn the_newest_who_in_a_batch_wins() {
+        let batch: LogBatch = serde_json::from_str(WHO).unwrap();
+        let (at, level, classes, race) = newest_identity(&batch.events).unwrap();
+        assert_eq!(at.unix_timestamp(), 1_785_962_763);
+        assert_eq!(level, 16);
+        assert_eq!(classes, ["WAR", "DRU", "NEC"]);
+        assert_eq!(race.as_deref(), Some("Dark Elf"));
+        assert_eq!(
+            newest_identity(&serde_json::from_str::<LogBatch>(BATCH).unwrap().events),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_who_row_names_the_character_and_never_goes_backwards() {
+        let Some((app, _pool)) = live_app().await else {
+            return;
+        };
+
+        let identity = || {
+            Request::builder()
+                .uri("/api/v1/characters/erudin/morveus")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(json_of(&app, identity()).await.0, StatusCode::NOT_FOUND);
+
+        assert_eq!(
+            json_of(&app, post_events("s3cret", WHO)).await.0,
+            StatusCode::CREATED
+        );
+        let (status, view) = json_of(&app, identity()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["name"], "Morveus");
+        assert_eq!(view["level"], 16);
+        assert_eq!(view["race"], "Dark Elf");
+        assert_eq!(view["classes"], serde_json::json!(["WAR", "DRU", "NEC"]));
+        assert_eq!(view["identity_at"], "2026-08-05T20:46:03Z");
+
+        let older = r#"{"character":"Morveus","server":"erudin","events":[
+            {"at": 1785958164, "kind": "who", "level": 15, "classes": ["WAR"]}
+        ]}"#;
+        json_of(&app, post_events("s3cret", older)).await;
+        let (_, view) = json_of(&app, identity()).await;
+        assert_eq!(view["level"], 16, "a replayed older row is ignored");
+
+        let newer = r#"{"character":"Morveus","server":"erudin","events":[
+            {"at": 1785999999, "kind": "who", "level": 17, "classes": ["WAR", "DRU"]}
+        ]}"#;
+        json_of(&app, post_events("s3cret", newer)).await;
+        let (_, view) = json_of(&app, identity()).await;
+        assert_eq!(view["level"], 17);
+        assert_eq!(view["classes"], serde_json::json!(["WAR", "DRU"]));
+        assert_eq!(view["race"], serde_json::Value::Null, "anonymity clears it");
+    }
+
+    #[tokio::test]
+    async fn a_character_who_never_ran_who_reads_as_unknown() {
+        let Some((app, _pool)) = live_app().await else {
+            return;
+        };
+        json_of(&app, post_events("s3cret", BATCH)).await;
+        let (status, view) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Dorsk")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["level"], serde_json::Value::Null);
+        assert_eq!(view["race"], serde_json::Value::Null);
+        assert_eq!(view["classes"], serde_json::json!([]));
+        assert_eq!(view["identity_at"], serde_json::Value::Null);
     }
 
     fn post_harvest(token: Option<&str>, body: &str) -> Request<Body> {
