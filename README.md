@@ -139,6 +139,18 @@ The client does not reload a skin by itself, so that `/loadskin` is still on
 you. The previous skin directory and any ini replaced are backed up beside
 themselves first, exactly as the subcommand does.
 
+### Log colour
+
+```toml
+[log]
+colour = false   # `color` works too
+```
+
+Left out, colour is on unless `NO_COLOR` is set. Turn it off where the escape
+codes are printed rather than acted on: a console reached through Wine, or a
+log the daemon is redirected into. Read once at startup, so changing it needs a
+restart.
+
 ### Finding the game
 
 `game.process` is the name eqld looks for in the process list to decide whether
