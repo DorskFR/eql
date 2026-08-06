@@ -139,6 +139,20 @@ impl Config {
         self.api_url("harvest")
     }
 
+    pub fn fights_endpoint(&self) -> String {
+        self.api_url("fights")
+    }
+
+    /// Ours, beside the state file: the log reader's own directory is scanned
+    /// and shipped wholesale, and fights do not travel that way.
+    pub fn fights_dir(&self) -> PathBuf {
+        self.state_path()
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.join("fights"))
+            .unwrap_or_else(|| PathBuf::from("fights"))
+    }
+
     pub fn icon_sheet_endpoint(&self, sheet: u32) -> String {
         self.api_url(&format!("icons/sheets/{sheet}"))
     }
@@ -306,6 +320,32 @@ mod tests {
         assert_eq!(
             config.icon_sheet_endpoint(379),
             "http://localhost:8080/api/v1/icons/sheets/379"
+        );
+        assert_eq!(
+            config.fights_endpoint(),
+            "http://localhost:8080/api/v1/fights"
+        );
+        assert_eq!(config.fights_dir(), PathBuf::from("fights"));
+    }
+
+    #[test]
+    fn fights_are_staged_beside_the_state_file() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [state]
+            path = "/var/lib/eqld/state.json"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.fights_dir(),
+            PathBuf::from("/var/lib/eqld/fights"),
+            "never the log reader's directory, which is uploaded wholesale"
         );
     }
 

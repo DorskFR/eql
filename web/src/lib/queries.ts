@@ -1,14 +1,16 @@
 import { createInfiniteQuery, createQuery } from '@tanstack/svelte-query';
-import { endpoints, type HarvestKind, type LogEvent } from './api';
+import { endpoints, type FightView, type HarvestKind, type LogEvent } from './api';
 
 const REFETCH_MS = 30_000;
 const EVENT_PAGE = 100;
+const FIGHT_PAGE = 50;
 
 export const qk = {
 	characters: ['characters'] as const,
 	inventory: (server: string, name: string) => ['inventory', server, name] as const,
 	stats: (server: string, name: string) => ['stats', server, name] as const,
 	events: (server: string, name: string) => ['events', server, name] as const,
+	fights: (server: string, name: string) => ['fights', server, name] as const,
 	harvest: (server: string, name: string, kind: HarvestKind) =>
 		['harvest', server, name, kind] as const,
 	item: (key: string) => ['item', key] as const,
@@ -45,6 +47,17 @@ export const useEvents = (server: () => string, name: () => string) =>
 		initialPageParam: undefined as string | undefined,
 		getNextPageParam: (last: LogEvent[]) =>
 			last.length < EVENT_PAGE ? undefined : last[last.length - 1].at,
+		refetchInterval: REFETCH_MS
+	}));
+
+export const useFights = (server: () => string, name: () => string) =>
+	createInfiniteQuery(() => ({
+		queryKey: qk.fights(server(), name()),
+		queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+			endpoints.fights(server(), name(), FIGHT_PAGE, pageParam),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (last: FightView[]) =>
+			last.length < FIGHT_PAGE ? undefined : last[last.length - 1].started_at,
 		refetchInterval: REFETCH_MS
 	}));
 

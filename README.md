@@ -92,9 +92,10 @@ repoints them at the new log.
 Upstream's suite is five tkinter GUIs plus one headless entry point
 (`eql_atlas --replay`). We carry a small additive patch — `vendor/eql-log-reader`,
 applied in CI to upstream's pinned commit, published as assets on our own
-releases — that adds two console tools: `eql_headless`, the DPS meter's
-lifetime-stats layer with no window, and `eql_quest_cli`, which curates the
-tracked-quest list from the command line. `install-tools` fetches that build by
+releases — that adds three console tools: `eql_headless`, the DPS meter's
+lifetime-stats layer with no window; `eql_quest_cli`, which curates the
+tracked-quest list from the command line; and `eql_fights_cli`, which dumps a
+log's completed fights as JSON. `install-tools` fetches that build by
 default; `[tools.log_reader] repo` points back at upstream if you would rather
 have stock.
 
@@ -124,6 +125,28 @@ A character with two class builds writes one `alltime` file per build. The API
 keeps a single document per character and kind, so eqld merges them into one
 `{"builds": {"WAR-CLR": …, "WAR-SHM": …}}` document. A file the reader wrote
 before `/who` revealed the class combo has no build name and ships flat.
+
+### Fight history
+
+On the same beat as the replay, eqld runs `eql_fights_cli` over every character
+log and posts what it finds to `POST /api/v1/fights` as
+`{"character", "server", "fights": [...]}`. A fight is upstream's own
+`CombatTracker` encounter — start, duration, active seconds, enemies, allies,
+damage out and in, healing, kills, deaths, stance, invocation, per-ability
+damage, casts and resists — plus the zone it started in, interleaved from the
+log's `You have entered <zone>.` lines because the tracker does not record one.
+
+Fights are history, so they accumulate rather than replace: the server keys them
+on `(character, server, start_wall)` and ignores one it already has. eqld keeps
+the newest `start_wall` it has had accepted in `state.json`, asks the tool only
+for what came after it, and filters again before posting, so a tick that fails
+replays exactly the same batch and a tick with nothing new posts nothing at all.
+The dumps are staged beside the state file, never in the log reader's own
+directory — that one is uploaded wholesale as harvest documents.
+
+A fight still running when the log ends is not shipped until it closes: the same
+fight would otherwise arrive twice under one `start_wall`, and the first,
+half-finished version would be the one that stuck.
 
 ### Quests
 

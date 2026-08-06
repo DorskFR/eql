@@ -43,11 +43,12 @@ fn the_patch_creates_the_tool_eqld_looks_for() {
         .lines()
         .filter_map(|line| line.strip_prefix("+++ b/"))
         .collect();
-    assert!(
-        created.contains(&format!("{}.py", eqld::tools::HEADLESS_STEM).as_str()),
-        "the patch does not add {}.py: {created:?}",
-        eqld::tools::HEADLESS_STEM
-    );
+    for stem in [eqld::tools::HEADLESS_STEM, eqld::tools::FIGHTS_STEM] {
+        assert!(
+            created.contains(&format!("{stem}.py").as_str()),
+            "the patch does not add {stem}.py: {created:?}"
+        );
+    }
     for expected in [
         "eql_quest_cli.py",
         "eql_dps_meter.py",
@@ -66,9 +67,41 @@ fn the_patch_creates_the_tool_eqld_looks_for() {
 #[test]
 fn the_patched_spec_builds_the_headless_tools_as_console_binaries() {
     let patch = read("headless.patch");
-    assert!(patch.contains("+CONSOLE_TOOLS = {\"eql_headless\", \"eql_quest_cli\"}"));
+    assert!(patch
+        .contains("+CONSOLE_TOOLS = {\"eql_headless\", \"eql_quest_cli\", \"eql_fights_cli\"}"));
     assert!(patch.contains("+        console=tool in CONSOLE_TOOLS,"));
     assert!(patch.contains("+HIDDEN = {\"eql_dps_meter\": [\"eql_headless\"]"));
+}
+
+/// `CombatTracker.history` is wiped at every session banner and capped at
+/// MAX_FIGHT_HISTORY, so reading it instead of listening would silently lose
+/// fights.
+#[test]
+fn the_fights_tool_listens_for_fights_instead_of_reading_the_history() {
+    let patch = read("headless.patch");
+    assert!(patch.contains("+from eql_combat_tracker import CombatTracker"));
+    assert!(patch.contains("+    tracker.fight_listeners.append("));
+    assert!(
+        !patch.contains("tracker.history"),
+        "the fights tool must never read the capped, session-reset history"
+    );
+    assert!(
+        patch.contains(r#"+ZONE_RE = re.compile(TS_RE + r"You have entered (?P<zone>.+)\.\s*$")"#),
+        "a fight carries the zone it happened in"
+    );
+}
+
+/// A tool the patch adds but `apply.sh` does not assert on would go missing on
+/// an upstream bump without anything failing.
+#[test]
+fn apply_sh_insists_on_every_tool_the_daemon_resolves() {
+    let script = read("apply.sh");
+    for stem in [eqld::tools::HEADLESS_STEM, eqld::tools::FIGHTS_STEM] {
+        assert!(
+            script.contains(&format!("{stem}.py")),
+            "apply.sh drops {stem}"
+        );
+    }
 }
 
 #[test]

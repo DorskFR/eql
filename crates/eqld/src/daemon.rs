@@ -1,8 +1,8 @@
 use crate::{
     backoff::Backoff,
     config::Config,
-    harvest, logs,
-    state::{FileState, LastStatus, LogState, State},
+    fights, harvest, logs,
+    state::{FightsState, FileState, LastStatus, LogState, State},
 };
 use eql_core::{
     api::{HarvestDoc, InventoryUpload, LogBatch},
@@ -101,6 +101,7 @@ pub struct TickReport {
     pub log_lines_dropped: usize,
     pub harvested: usize,
     pub harvest_skipped: usize,
+    pub fights: usize,
 }
 
 /// One tick reads at most this much of each log; the rest waits for the next
@@ -114,6 +115,23 @@ struct Watched {
     harvest: Option<usize>,
 }
 
+fn fights_tool(
+    installed: Option<&crate::tools::Runner>,
+    enabled: bool,
+) -> Option<crate::tools::Runner> {
+    if !enabled {
+        return None;
+    }
+    let found = installed.and_then(|base| base.sibling(crate::tools::FIGHTS_STEM));
+    if installed.is_some() && found.is_none() {
+        tracing::warn!(
+            tool = crate::tools::FIGHTS_STEM,
+            "the installed log reader has no fights tool; no fight history will be uploaded"
+        );
+    }
+    found
+}
+
 pub struct Daemon {
     config: Config,
     client: reqwest::Client,
@@ -123,6 +141,7 @@ pub struct Daemon {
     watched: Option<Watched>,
     installed: Option<crate::tools::Runner>,
     runner: Option<crate::tools::Runner>,
+    fights_tool: Option<crate::tools::Runner>,
     last_replay: Option<std::time::Instant>,
     overlays: Option<crate::overlays::Supervisor>,
     processes: crate::overlays::ProcessWatch,
@@ -182,6 +201,7 @@ impl Daemon {
             .replay_enabled()
             .then(|| installed.clone())
             .flatten();
+        let fights_tool = fights_tool(installed.as_ref(), settings.enabled);
         let overlays = installed
             .as_ref()
             .map(|base| crate::overlays::Supervisor::new(base, &plan.wanted, &plan.hidden));
@@ -195,6 +215,7 @@ impl Daemon {
             watched: None,
             installed,
             runner,
+            fights_tool,
             last_replay: None,
             overlays,
             processes: crate::overlays::ProcessWatch::new(),
@@ -262,6 +283,7 @@ impl Daemon {
             self.last_replay = None;
         }
         self.runner = replay;
+        self.fights_tool = fights_tool(self.installed.as_ref(), settings.enabled);
 
         let base = self.installed.clone();
         if base.is_none()
@@ -298,29 +320,140 @@ impl Daemon {
             .is_none_or(|at| at.elapsed() >= self.config.tools.log_reader.replay_interval())
     }
 
-    async fn run_replay(&mut self, root: &Path) {
-        let Some(runner) = self.runner.clone() else {
-            return;
-        };
+    async fn run_replay(&mut self, root: &Path, report: &mut TickReport) -> bool {
+        if self.runner.is_none() && self.fights_tool.is_none() {
+            return false;
+        }
         if !self.replay_due() {
-            return;
+            return false;
         }
         let Ok(paths) = logs::scan(root) else {
-            return;
+            return false;
         };
         self.last_replay = Some(std::time::Instant::now());
-        let report = crate::tools::replay_all(
-            &runner,
-            &paths,
-            self.config.tools.log_reader.replay_timeout(),
-        )
-        .await;
-        if report.ran > 0 || report.failed > 0 {
-            tracing::debug!(
-                replayed = report.ran,
-                failed = report.failed,
-                "log reader replay"
-            );
+        if let Some(runner) = self.runner.clone() {
+            let replayed = crate::tools::replay_all(
+                &runner,
+                &paths,
+                self.config.tools.log_reader.replay_timeout(),
+            )
+            .await;
+            if replayed.ran > 0 || replayed.failed > 0 {
+                tracing::debug!(
+                    replayed = replayed.ran,
+                    failed = replayed.failed,
+                    "log reader replay"
+                );
+            }
+        }
+        self.collect_fights(&paths, report).await
+    }
+
+    async fn collect_fights(&mut self, paths: &[PathBuf], report: &mut TickReport) -> bool {
+        let Some(tool) = self.fights_tool.clone() else {
+            return false;
+        };
+        let dir = self.config.fights_dir();
+        let mut dirty = false;
+        for path in paths {
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some((character, server)) = logs::parse_filename(file_name) else {
+                continue;
+            };
+            let key = file_name.to_string();
+            let watermark = self
+                .state
+                .fights
+                .get(&key)
+                .map(|state| state.last_start_wall_ms);
+            let out = fights::out_path(&dir, &character, &server);
+            let since = watermark.map(fights::since_arg);
+            if let Err(err) = crate::tools::fights(
+                &tool,
+                path,
+                &out,
+                since.as_deref(),
+                self.config.tools.log_reader.replay_timeout(),
+            )
+            .await
+            {
+                tracing::warn!(log = %path.display(), %err, "fights dump failed");
+                continue;
+            }
+            let text = match std::fs::read_to_string(&out) {
+                Ok(text) => text,
+                Err(err) => {
+                    tracing::warn!(file = %out.display(), %err, "no fights dump to read");
+                    continue;
+                }
+            };
+            let emitted = match fights::parse(&text) {
+                Ok(fights) => fights,
+                Err(err) => {
+                    report.parse_failures += 1;
+                    tracing::warn!(file = %out.display(), %err, "fights dump is not json");
+                    continue;
+                }
+            };
+            let new = fights::newer_than(emitted, watermark);
+            if new.is_empty() {
+                continue;
+            }
+            dirty |= self
+                .send_fights(&character, &server, key, &new, report)
+                .await;
+        }
+        dirty
+    }
+
+    async fn send_fights(
+        &mut self,
+        character: &str,
+        server: &str,
+        key: String,
+        new: &[serde_json::Value],
+        report: &mut TickReport,
+    ) -> bool {
+        let upload = fights::Upload {
+            character,
+            server,
+            fights: new,
+        };
+        let count = new.len();
+        tracing::info!(%character, %server, fights = count, "uploading fights");
+        match self.send(self.config.fights_endpoint(), &upload).await {
+            Ok(status) if status.is_success() => {
+                report.fights += count;
+                let previous = self.state.fights.get(&key).copied().unwrap_or_default();
+                let last_start_wall_ms = fights::newest(new).unwrap_or(previous.last_start_wall_ms);
+                self.state.fights.insert(
+                    key,
+                    FightsState {
+                        last_start_wall_ms,
+                        uploaded: previous.uploaded + count,
+                        uploaded_at: unix_secs(SystemTime::now()),
+                    },
+                );
+                tracing::info!(%character, %server, fights = count, status = status.as_u16(), "uploaded fights");
+                true
+            }
+            Ok(status) if status.is_server_error() => {
+                report.retryable_failures += 1;
+                tracing::warn!(%character, %server, status = status.as_u16(), "server error, fights replay next tick");
+                false
+            }
+            Ok(status) => {
+                report.rejections += 1;
+                tracing::error!(%character, %server, status = status.as_u16(), "fights rejected, replaying next tick");
+                false
+            }
+            Err(err) => {
+                report.retryable_failures += 1;
+                tracing::warn!(%character, %server, %err, "fights upload failed, replaying next tick");
+                false
+            }
         }
     }
 
@@ -408,7 +541,7 @@ impl Daemon {
         let (logs_dirty, log_files) = self.tail_logs(&root, &mut report).await;
         dirty_state |= logs_dirty;
 
-        self.run_replay(&root).await;
+        dirty_state |= self.run_replay(&root, &mut report).await;
         self.supervise_overlays(&root).await;
 
         let mut harvest_files = None;

@@ -53,6 +53,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route("/api/v1/inventory", post(ingest))
         .route("/api/v1/events", post(ingest_events))
         .route("/api/v1/harvest", post(ingest_harvest))
+        .route("/api/v1/fights", post(ingest_fights))
         .route(
             "/api/v1/icons/sheets/{sheet}",
             put(put_icon_sheet).layer(DefaultBodyLimit::max(SHEET_LIMIT)),
@@ -81,6 +82,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route(
             "/api/v1/characters/{server}/{name}/harvest/{kind}",
             get(get_harvest),
+        )
+        .route(
+            "/api/v1/characters/{server}/{name}/fights",
+            get(list_fights),
         )
         .route("/api/v1/icons/{file}", get(get_icon))
         .route("/api/v1/items", get(search_items))
@@ -392,6 +397,177 @@ async fn get_harvest(
     }))
 }
 
+fn parse_cursor(before: Option<&str>) -> Result<Option<OffsetDateTime>, AppError> {
+    before
+        .filter(|cursor| !cursor.is_empty())
+        .map(|cursor| {
+            OffsetDateTime::parse(cursor, &time::format_description::well_known::Rfc3339)
+                .map_err(|_| AppError::BadCursor(cursor.to_string()))
+        })
+        .transpose()
+}
+
+#[derive(Deserialize)]
+struct FightsUpload {
+    character: String,
+    server: String,
+    fights: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct FightMeta {
+    start_wall: f64,
+    #[serde(default)]
+    zone: Option<String>,
+    #[serde(default)]
+    span: f64,
+    #[serde(default)]
+    active_secs: f64,
+    #[serde(default)]
+    dmg_out_you: i64,
+    #[serde(default)]
+    dmg_in_you: i64,
+    #[serde(default)]
+    heal_out: i64,
+    #[serde(default)]
+    kills: i32,
+    #[serde(default)]
+    deaths: i32,
+    #[serde(default)]
+    enemies: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct FightsAccepted {
+    received: usize,
+    stored: usize,
+}
+
+fn fight_meta(fight: &serde_json::Value) -> Result<(FightMeta, OffsetDateTime), AppError> {
+    let meta: FightMeta =
+        serde_json::from_value(fight.clone()).map_err(|err| AppError::BadFight(err.to_string()))?;
+    if !meta.start_wall.is_finite() {
+        return Err(AppError::BadFight("start_wall is not finite".into()));
+    }
+    let nanos = (meta.start_wall * 1e9).round() as i128;
+    let started_at = OffsetDateTime::from_unix_timestamp_nanos(nanos).map_err(|_| {
+        AppError::BadFight(format!("start_wall {} is out of range", meta.start_wall))
+    })?;
+    Ok((meta, started_at))
+}
+
+/// Fights are history: rows accumulate, and a replayed log re-posting a fight
+/// the server already has is a no-op on `(character_id, start_wall)`.
+async fn ingest_fights(
+    State(state): State<AppState>,
+    Json(upload): Json<FightsUpload>,
+) -> Result<(StatusCode, Json<FightsAccepted>), AppError> {
+    if upload.character.trim().is_empty() || upload.server.trim().is_empty() {
+        return Err(AppError::EmptyIdentity);
+    }
+    if upload.fights.is_empty() {
+        return Err(AppError::EmptyFights);
+    }
+
+    let mut parsed = Vec::with_capacity(upload.fights.len());
+    for fight in &upload.fights {
+        let (meta, started_at) = fight_meta(fight)?;
+        parsed.push((meta, started_at, fight));
+    }
+
+    let mut tx = state.pool.begin().await?;
+    let character_id = upsert_character(&mut tx, &upload.character, &upload.server).await?;
+    let mut stored = 0usize;
+    for (meta, started_at, fight) in &parsed {
+        stored += sqlx::query(
+            "insert into fights (character_id, start_wall, started_at, zone, span, active_secs, \
+                 dmg_out, dmg_in, heal_out, kills, deaths, enemies, fight) \
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+             on conflict (character_id, start_wall) do nothing",
+        )
+        .bind(character_id)
+        .bind(meta.start_wall)
+        .bind(started_at)
+        .bind(meta.zone.as_deref())
+        .bind(meta.span)
+        .bind(meta.active_secs)
+        .bind(meta.dmg_out_you)
+        .bind(meta.dmg_in_you)
+        .bind(meta.heal_out)
+        .bind(meta.kills)
+        .bind(meta.deaths)
+        .bind(&meta.enemies)
+        .bind(SqlJson(fight))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected() as usize;
+    }
+    tx.commit().await?;
+
+    tracing::info!(
+        character = %upload.character,
+        server = %upload.server,
+        received = parsed.len(),
+        stored,
+        "stored fights"
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(FightsAccepted {
+            received: parsed.len(),
+            stored,
+        }),
+    ))
+}
+
+#[derive(Serialize)]
+struct FightView {
+    id: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    started_at: OffsetDateTime,
+    start_wall: f64,
+    fight: serde_json::Value,
+}
+
+async fn list_fights(
+    State(state): State<AppState>,
+    Path((server, name)): Path<(String, String)>,
+    Query(page): Query<EventPage>,
+) -> Result<Json<Vec<FightView>>, AppError> {
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let before = parse_cursor(page.before.as_deref())?;
+
+    let rows = sqlx::query(
+        "select f.id, f.started_at, f.start_wall, f.fight \
+         from fights f \
+         join characters c on c.id = f.character_id \
+         where lower(c.server) = lower($1) and lower(c.name) = lower($2) \
+           and ($3::timestamptz is null or f.started_at < $3) \
+         order by f.started_at desc, f.id desc \
+         limit $4",
+    )
+    .bind(&server)
+    .bind(&name)
+    .bind(before)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                let fight: SqlJson<serde_json::Value> = row.try_get("fight")?;
+                Ok(FightView {
+                    id: row.try_get("id")?,
+                    started_at: row.try_get("started_at")?,
+                    start_wall: row.try_get("start_wall")?,
+                    fight: fight.0,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+    ))
+}
+
 #[derive(Deserialize)]
 struct EventPage {
     limit: Option<i64>,
@@ -413,15 +589,7 @@ async fn list_events(
     Query(page): Query<EventPage>,
 ) -> Result<Json<Vec<EventView>>, AppError> {
     let limit = page.limit.unwrap_or(100).clamp(1, 500);
-    let before = page
-        .before
-        .as_deref()
-        .filter(|cursor| !cursor.is_empty())
-        .map(|cursor| {
-            OffsetDateTime::parse(cursor, &time::format_description::well_known::Rfc3339)
-                .map_err(|_| AppError::BadCursor(cursor.to_string()))
-        })
-        .transpose()?;
+    let before = parse_cursor(page.before.as_deref())?;
 
     let rows = sqlx::query(
         "select e.id, e.at, e.kind, e.payload \
@@ -1125,6 +1293,10 @@ enum AppError {
     EmptyEvents,
     #[error("harvest doc must not be null")]
     EmptyHarvestDoc,
+    #[error("fight upload must contain at least one fight")]
+    EmptyFights,
+    #[error("unusable fight: {0}")]
+    BadFight(String),
     #[error("unknown harvest kind {0}")]
     UnknownHarvestKind(String),
     #[error("before={0} is not an rfc3339 timestamp")]
@@ -1153,6 +1325,8 @@ impl IntoResponse for AppError {
             | AppError::EmptyEntries
             | AppError::EmptyEvents
             | AppError::EmptyHarvestDoc
+            | AppError::EmptyFights
+            | AppError::BadFight(_)
             | AppError::UnknownHarvestKind(_)
             | AppError::BadCapturedAt(_)
             | AppError::EmptyLayoutName
@@ -1560,6 +1734,182 @@ mod tests {
         })
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    fn post_fights(token: Option<&str>, body: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/fights")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    }
+
+    fn fights_body(fights: &str) -> String {
+        format!(r#"{{"character":"Dorsk","server":"erudin","fights":{fights}}}"#)
+    }
+
+    fn fights_fixture() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/fights/eql_fights_Dorsk_erudin.json");
+        std::fs::read_to_string(path).expect("fixture is committed")
+    }
+
+    #[tokio::test]
+    async fn fight_writes_need_the_machine_token() {
+        let body = fights_body(r#"[{"start_wall":1785931338.0}]"#);
+        assert_eq!(
+            status_of(post_fights(None, &body)).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status_of(post_fights(Some("wrong"), &body)).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn fights_validate_before_touching_the_database() {
+        let cases = [
+            fights_body("[]"),
+            fights_body(r#"[{"span":12}]"#),
+            fights_body(r#"[{"start_wall":"yesterday"}]"#),
+            fights_body(r#"[{"start_wall":1.0e30}]"#),
+            r#"{"character":" ","server":"erudin","fights":[{"start_wall":1.0}]}"#.to_string(),
+        ];
+        for body in cases {
+            assert_eq!(
+                status_of(post_fights(Some("s3cret"), &body)).await,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_fight_cursor_is_rejected() {
+        let request = Request::builder()
+            .uri("/api/v1/characters/erudin/Dorsk/fights?before=yesterday")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(request).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn fights_accumulate_dedupe_and_page_newest_first() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+
+        let (status, accepted) = json_of(
+            &app,
+            post_fights(Some("s3cret"), &fights_body(&fights_fixture())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(accepted["received"], 13);
+        assert_eq!(accepted["stored"], 13);
+
+        let (status, again) = json_of(
+            &app,
+            post_fights(Some("s3cret"), &fights_body(&fights_fixture())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(again["received"], 13);
+        assert_eq!(again["stored"], 0, "re-posting the same fights is a no-op");
+
+        let stored: i64 = sqlx::query_scalar("select count(*) from fights")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 13);
+
+        let page = |query: &str| {
+            Request::builder()
+                .uri(format!("/api/v1/characters/erudin/dorsk/fights?{query}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, fights) = json_of(&app, page("limit=200")).await;
+        assert_eq!(status, StatusCode::OK);
+        let fights = fights.as_array().unwrap().clone();
+        assert_eq!(fights.len(), 13);
+        assert_eq!(fights[0]["start_wall"], 1785960884.0);
+        assert_eq!(fights[0]["started_at"], "2026-08-05T20:14:44Z");
+        assert_eq!(fights[0]["fight"]["zone"], "The Greater Faydark");
+        assert_eq!(fights[0]["fight"]["kills"], 5);
+        assert_eq!(fights[0]["fight"]["abilities_dmg"]["Icestrike"]["hits"], 11);
+        assert!(
+            fights
+                .windows(2)
+                .all(|pair| pair[0]["start_wall"].as_f64() > pair[1]["start_wall"].as_f64()),
+            "newest first"
+        );
+
+        let (_, first) = json_of(&app, page("limit=2")).await;
+        assert_eq!(first.as_array().unwrap().len(), 2);
+
+        let (_, older) = json_of(&app, page("limit=200&before=2026-08-05T20:14:44Z")).await;
+        let older = older.as_array().unwrap().clone();
+        assert_eq!(older.len(), 12);
+        assert_eq!(older[0]["start_wall"], 1785960439.0);
+
+        let sparse = r#"[{"start_wall":1785931338.5,"span":0,"active_secs":0,"enemies":[],
+                          "dmg_out_you":0,"dmg_in_you":0,"heal_out":0,"kills":0,"deaths":0}]"#;
+        let (status, accepted) =
+            json_of(&app, post_fights(Some("s3cret"), &fights_body(sparse))).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(accepted["stored"], 1, "a fight with no zone still stores");
+
+        let (_, listed) = json_of(&app, page("limit=200")).await;
+        assert_eq!(listed.as_array().unwrap().len(), 14);
+
+        let characters: i64 = sqlx::query_scalar("select count(*) from characters")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(characters, 1);
+
+        let (status, unknown) = json_of(&app, {
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Nobody/fights")
+                .body(Body::empty())
+                .unwrap()
+        })
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unknown.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn fight_meta_reads_the_columns_it_needs_and_tolerates_the_rest() {
+        let (meta, at) = fight_meta(&serde_json::json!({
+            "start_wall": 1785931338.0,
+            "zone": "Najena 4 (Refined)",
+            "enemies": ["a greater skeleton"],
+            "dmg_out_you": 7654,
+            "kills": 5,
+            "unheard_of_field": {"a": 1}
+        }))
+        .unwrap();
+        assert_eq!(meta.zone.as_deref(), Some("Najena 4 (Refined)"));
+        assert_eq!(meta.enemies, ["a greater skeleton"]);
+        assert_eq!(meta.dmg_out_you, 7654);
+        assert_eq!(meta.kills, 5);
+        assert_eq!(meta.deaths, 0);
+        assert_eq!(at.unix_timestamp(), 1785931338);
+
+        let bare = fight_meta(&serde_json::json!({ "start_wall": 1.0 })).unwrap();
+        assert_eq!(bare.0.zone, None);
+        assert!(bare.0.enemies.is_empty());
+
+        assert!(fight_meta(&serde_json::json!({})).is_err());
+        assert!(fight_meta(&serde_json::json!([])).is_err());
+        assert!(fight_meta(&serde_json::json!({ "start_wall": 1e30 })).is_err());
     }
 
     fn layout_write(method: &str, uri: &str, token: Option<&str>, body: &str) -> Request<Body> {

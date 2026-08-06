@@ -24,7 +24,7 @@ fi
 git -C "$dir" apply --check "$here/headless.patch"
 git -C "$dir" apply "$here/headless.patch"
 
-for tool in eql_headless.py eql_quest_cli.py; do
+for tool in eql_headless.py eql_quest_cli.py eql_fights_cli.py; do
     test -f "$dir/$tool" || { echo "$tool is missing after the patch" >&2; exit 1; }
 done
 echo "patched $dir at $UPSTREAM_COMMIT"
