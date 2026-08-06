@@ -36,6 +36,10 @@ hidden = ["dps"]            # …of which these run without a window
 
 [socials]
 enabled = false             # keep the in-game EQLD button applied
+
+[skin]
+enabled = false             # keep the installed skin up to date
+layout = "dorskui"
 ```
 
 | Key | Default | What |
@@ -50,6 +54,16 @@ enabled = false             # keep the in-game EQLD button applied
 | `hidden` | `[]` | Subset of `overlays` to run with no window. |
 | `atlas` | `"replay"` | Who keeps the Atlas database: `"replay"` or `"overlay"`. |
 
+And outside `[tools.log_reader]`:
+
+| Key | Default | What |
+|---|---|---|
+| `game.process` | `eqgame.exe` | The client's name in the process list. Set it to `""` to say it cannot be seen at all. |
+| `skin.enabled` | `false` | Keep the installed skin up to date from the API. |
+| `skin.layout` | — | The layout to install; required when `skin.enabled` is on. |
+| `skin.name` | layout's default | A named skin inside that layout, like `--skin` on the subcommand. |
+| `skin.check_secs` | `300` | Seconds between bundle checks (min 30, or `0` for every tick). |
+
 ### Toggling without a restart
 
 eqld re-reads its config file on every poll tick and applies what it can while
@@ -63,6 +77,8 @@ listed and still healthy is left alone rather than restarted.
 | everything under `[tools.log_reader]`: `enabled`, `exe`, `repo`, `version`, `replay_secs`, `replay_timeout_secs`, `overlays`, `hidden`, `atlas` | `game.root` |
 | everything under `[harvest]`: `enabled`, `dir` | `game.poll_secs` |
 | `[socials] enabled` | |
+| everything under `[skin]` | |
+| `game.process` | |
 | | `api.url`, `api.token` |
 | | `state.path` |
 
@@ -70,6 +86,83 @@ A restart-only field that changed is logged as such and the running value is
 kept, so nothing is applied by halves. A config file that does not parse is
 logged once and ignored: the daemon keeps running on the last one that worked,
 and picks up the next edit that fixes it.
+
+### One eqld at a time
+
+The daemon takes a lock file — `eqld.lock`, beside `state.json` — before it
+starts, holding its own pid, and releases it on a clean exit. A second instance
+reads that file, and if the pid is still alive and still eqld it refuses to
+start:
+
+```
+another eqld is already running as pid 8124 (eqld.exe); stop it, or start with
+--force to take C:\Users\dorsk\AppData\Local\eqld\eqld.lock from it
+```
+
+It exits non-zero and uploads nothing, which is the point: two daemons on one
+game folder upload every dump twice. A lock left behind by a crash or a hard
+kill does not block anything — a pid that is gone, or that now belongs to some
+other program, is stale and is taken over on the next start. `eqld <config>
+--force` takes the lock unconditionally, for the case where the refusal is
+wrong. This is a plain file, not a Windows named mutex, so it behaves the same
+under Wine, Winlator, macOS and Termux.
+
+The subcommands are one-shots and are not locked; only the daemon loop is.
+
+### Keeping the skin installed
+
+```toml
+[skin]
+enabled = true
+layout = "dorskui"
+# name = "v4"
+```
+
+`install-skin` is a one-shot you run by hand. `[skin] enabled = true` puts the
+same work on the daemon's tick, which matters where typing a command line is
+painful. Each check fetches the layout's bundle, hashes it, and installs it only
+if that hash is not the one recorded in `state.json` — so an unchanged skin is
+never written over the client's files, and a redesign in the web designer lands
+by itself within `check_secs`. Changing `layout` or `name` also counts as a
+change, and both are picked up without restarting the daemon.
+
+**The game must be closed**, for the same reason the social installer waits:
+`<root>/uifiles/` and the `UI_*_LO1.ini` belong to the client, which rewrites
+them when it exits. eqld says so once and keeps checking; the moment the game is
+gone the new skin lands, and the log tells you to go and apply it:
+
+```
+a new skin is installed; run in game: /loadskin dorskui
+```
+
+The client does not reload a skin by itself, so that `/loadskin` is still on
+you. The previous skin directory and any ini replaced are backed up beside
+themselves first, exactly as the subcommand does.
+
+### Finding the game
+
+`game.process` is the name eqld looks for in the process list to decide whether
+the client is running. It defaults to `eqgame.exe`, which is what the client
+reports natively and inside a Wine prefix. Rename it if your setup shows
+something else.
+
+Three things hang off that answer: overlays start and stop with the game, and
+the social installer and skin sync only write while it is gone. If the client
+cannot be seen under any name — which is possible under Winlator, where the
+container may not expose its processes to whatever eqld can see — set:
+
+```toml
+[game]
+process = ""
+```
+
+That does not mean "always closed". It means eqld does not know, and the safe
+answer to not knowing is to never write into the game root behind the client's
+back: `[socials] enabled` and `[skin] enabled` become no-ops that log why, and
+no overlay is ever launched. Inventory dumps, log events, harvest and fights all
+still upload — those only read. Run `install-social` and `install-skin` by hand,
+with the game closed, when you want those files changed; both still work, and
+`install-social` warns that it could not verify the game was shut.
 
 ### The in-game EQLD button
 
@@ -215,3 +308,80 @@ the ones that are not.
 `atlas = "overlay"` is the other way round: the replay tick is skipped entirely
 and the Atlas overlay runs visibly, keeping its own database and giving you the
 quest window to curate in. eqld logs which mode is active at startup.
+
+## EverQuest on a phone, under Winlator
+
+Winlator runs the Windows client on Android through Wine and Box64. eqld runs
+there too, and everything the profile needs — inventory, log events, fights,
+skins — is file-watching and HTTP, none of which cares that the CPU is ARM.
+
+### Which binary
+
+Releases ship `eqld-windows-x86_64.exe`, `eqld-macos-aarch64`,
+`eqld-linux-x86_64` and `eqld-linux-aarch64`. The two Linux ones are static musl
+builds: no glibc, no shared libraries, drop them anywhere and run them.
+
+**Inside the container** (the safe choice): use the Windows exe. It is another
+Windows process next to `eqgame.exe`, it sees the same drive letters and the
+same `C:\...\EverQuest Legends` path the client does, and there is nothing to
+work out about paths. It is emulated, so it costs a little CPU; for a poll loop
+and a few HTTP posts that is not much.
+
+**Natively under Termux** (lighter, conditional): use `eqld-linux-aarch64`. No
+emulation at all. It only works if Termux can *reach the game files*, and that
+depends on where Winlator keeps its container. Check before committing to it:
+
+```sh
+ls ~/storage/shared/Winlator          # Termux: termux-setup-storage first
+find /sdcard -maxdepth 6 -name eqgame.exe 2>/dev/null
+```
+
+If that finds the client, point `game.root` at the directory holding it and you
+are done. If it finds nothing, the container lives in Winlator's app-private
+storage (`/data/data/com.winlator/...`), which is unreadable from Termux without
+root — there is no config to fix that, so run the exe inside the container
+instead. Note also that Termux cannot see processes inside the container, so
+`[game] process = ""` applies (see *Finding the game*): reading and uploading
+work, writing the social and the skin do not.
+
+### Starting it with the game
+
+Winlator has no Task Scheduler. A `.bat` in the container that starts eqld and
+then the game is the whole mechanism — point the Winlator shortcut at it instead
+of at `eqgame.exe`:
+
+```bat
+@echo off
+cd /d "C:\Users\Public\Daybreak Game Company\Installed Games\EverQuest Legends"
+start "" /min eqld.exe eqld.toml
+eqgame.exe patchme
+```
+
+`start /min` returns immediately and leaves eqld running; the `.bat` then blocks
+on `eqgame.exe`, so the window closes when you quit the game. eqld keeps running
+after that — which is what you want, since the social and the skin are applied
+*after* the client exits. Launching the shortcut twice is safe: the second eqld
+sees the lock, prints the pid holding it, and exits.
+
+### What to switch on, and what it costs
+
+On a phone the defaults are already close to right.
+
+| Setting | Effect |
+|---|---|
+| `overlays = []` (the default) | No overlay windows. On a small screen with no mouse, anything else is in the way. |
+| `[tools.log_reader] enabled = false` | The lightest footprint there is: no `eql_atlas --replay` process is ever spawned, and nothing is harvested. You keep inventory, spellbook, `/who` and log events — the profile page stays current. You lose lifetime DPS stats, quest progress and fight history. |
+| `[tools.log_reader] enabled = true` | The replay process runs once per `replay_secs`, for a few seconds. That is the whole cost, and it buys fights, quests and `alltime` stats. |
+| `replay_secs = 600` | The middle road: same features, one tenth as many wake-ups as the 120s default. Nothing is lost — a replay resumes from its saved byte offset, so a long gap just means a longer catch-up. |
+| `poll_secs = 30` | Fewer directory scans. Uploads are that much less prompt, which for a profile page nobody is refreshing costs nothing. |
+
+The EQLD social button is worth more here than anywhere else: `/log on`, `/who`
+and the three `/outputfile` dumps are five commands you would otherwise type on
+a touch keyboard, and it is one tap. It needs `[socials] enabled = true` and a
+client whose process eqld can see, since the ini is only writable while the game
+is closed.
+
+Skin sync is the other one. Design the layout in the browser on a desktop, set
+`[skin] enabled = true` and `layout` on the phone, and the next time you close
+the game eqld installs it; `/loadskin` in game and the small-screen layout is
+there. No file transfer, no CLI.

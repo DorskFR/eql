@@ -78,9 +78,19 @@ fn urlencode(raw: &str) -> String {
         .collect()
 }
 
-pub async fn run(config: &Config, args: &[String]) -> Result<(), InstallError> {
-    let args = parse_args(args)?;
-    let url = bundle_url(config, &args);
+pub fn changed(previous: Option<&crate::state::SkinState>, args: &Args, digest: &str) -> bool {
+    match previous {
+        None => true,
+        Some(previous) => {
+            previous.digest != digest
+                || previous.layout != args.layout
+                || previous.name.as_deref() != args.skin.as_deref()
+        }
+    }
+}
+
+pub async fn fetch(config: &Config, args: &Args) -> Result<Vec<u8>, InstallError> {
+    let url = bundle_url(config, args);
     let response = reqwest::Client::new()
         .get(&url)
         .bearer_auth(&config.api.token)
@@ -105,6 +115,12 @@ pub async fn run(config: &Config, args: &[String]) -> Result<(), InstallError> {
             body: String::from_utf8_lossy(&bytes).chars().take(300).collect(),
         });
     }
+    Ok(bytes.to_vec())
+}
+
+pub async fn run(config: &Config, args: &[String]) -> Result<(), InstallError> {
+    let args = parse_args(args)?;
+    let bytes = fetch(config, &args).await?;
 
     let skin = install(&config.game.root, &bytes)?;
     tracing::info!(
@@ -343,6 +359,43 @@ mod tests {
                 .join("uifiles/dorskui/EQUI_ChatWindow.xml")
                 .exists(),
             "the new skin dir must not inherit stale files"
+        );
+    }
+
+    #[test]
+    fn a_bundle_is_only_reinstalled_when_something_about_it_changed() {
+        let installed = crate::state::SkinState {
+            layout: "dorskui".into(),
+            name: Some("v4".into()),
+            digest: "abc".into(),
+            installed: "dorskui".into(),
+            installed_at: Some(1),
+        };
+        let asked = Args {
+            layout: "dorskui".into(),
+            skin: Some("v4".into()),
+        };
+        assert!(!changed(Some(&installed), &asked, "abc"));
+        assert!(changed(Some(&installed), &asked, "def"));
+        assert!(changed(None, &asked, "abc"));
+        assert!(changed(
+            Some(&installed),
+            &Args {
+                layout: "other".into(),
+                skin: Some("v4".into())
+            },
+            "abc"
+        ));
+        assert!(
+            changed(
+                Some(&installed),
+                &Args {
+                    layout: "dorskui".into(),
+                    skin: None
+                },
+                "abc"
+            ),
+            "dropping --skin asks for the layout's default skin"
         );
     }
 

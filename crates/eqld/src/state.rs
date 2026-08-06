@@ -13,6 +13,17 @@ pub struct State {
     pub icons: BTreeMap<String, FileState>,
     #[serde(default)]
     pub fights: BTreeMap<String, FightsState>,
+    #[serde(default)]
+    pub skin: Option<SkinState>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkinState {
+    pub layout: String,
+    pub name: Option<String>,
+    pub digest: String,
+    pub installed: String,
+    pub installed_at: Option<i64>,
 }
 
 /// How far into a log's fight history has been accepted, keyed by log file.
