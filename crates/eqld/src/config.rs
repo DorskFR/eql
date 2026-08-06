@@ -15,6 +15,24 @@ pub struct Config {
     pub socials: SocialsConfig,
     #[serde(default)]
     pub skin: SkinConfig,
+    #[serde(default)]
+    pub log: LogConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LogConfig {
+    pub colour: Option<bool>,
+    pub color: Option<bool>,
+}
+
+impl LogConfig {
+    /// Unset follows NO_COLOR, which a console that cannot render the escape
+    /// codes has no way to tell us about.
+    pub fn colour(&self) -> bool {
+        self.colour
+            .or(self.color)
+            .unwrap_or_else(|| std::env::var_os("NO_COLOR").is_none())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -242,6 +260,9 @@ impl Config {
         if self.state.path != next.state.path {
             frozen.push("state.path");
         }
+        if self.log.colour() != next.log.colour() {
+            frozen.push("log.colour");
+        }
         frozen
     }
 
@@ -259,6 +280,7 @@ impl Config {
             tools: next.tools,
             socials: next.socials,
             skin: next.skin,
+            log: self.log.clone(),
         }
     }
 }
@@ -328,6 +350,51 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_colour_is_on_unless_the_config_turns_it_off() {
+        let with = |section: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                [api]
+                url = "u"
+                token = "t"
+                {section}
+                "#
+            ))
+            .unwrap()
+        };
+        assert!(with("").log.colour(), "absent section keeps colour");
+        assert!(!with("[log]\ncolour = false").log.colour());
+        assert!(with("[log]\ncolour = true").log.colour());
+        assert!(
+            !with("[log]\ncolor = false").log.colour(),
+            "either spelling"
+        );
+    }
+
+    #[test]
+    fn changing_log_colour_asks_for_a_restart() {
+        let base: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            "#,
+        )
+        .unwrap();
+        let mut quiet = base.clone();
+        quiet.log.colour = Some(false);
+        assert!(base.frozen_changes(&quiet).contains(&"log.colour"));
+        assert!(
+            base.hot_swap(quiet).log.colour(),
+            "the running value is kept until a restart"
+        );
+    }
 
     #[test]
     fn applies_defaults() {

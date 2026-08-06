@@ -47,14 +47,15 @@ fn split_args(args: Vec<String>) -> Invocation {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let Invocation { path, force, rest } = split_args(std::env::args().skip(1).collect());
+    let config = Config::load(&path)?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_ansi(config.log.colour())
         .init();
-
-    let Invocation { path, force, rest } = split_args(std::env::args().skip(1).collect());
-    let config = Config::load(&path)?;
 
     if let Some(subcommand) = rest.first() {
         return match subcommand.as_str() {
