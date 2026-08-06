@@ -1051,8 +1051,8 @@
 
 	.eq-slot {
 		position: relative;
-		width: 5.2rem;
-		height: 5.2rem;
+		width: 3.5rem;
+		height: 3.5rem;
 		flex: 0 0 auto;
 		display: flex;
 		align-items: center;
@@ -1070,8 +1070,9 @@
 
 	.eq-slot-label {
 		color: #55524a;
-		font-size: 0.68rem;
-		letter-spacing: 0.1em;
+		font-size: 0.5rem;
+		letter-spacing: 0.04em;
+		overflow-wrap: anywhere;
 	}
 
 	.eq-filled {
@@ -1084,8 +1085,8 @@
 
 	.eq-slot-name {
 		color: var(--eq-text);
-		font-size: 0.68rem;
-		line-height: 1.15;
+		font-size: 0.55rem;
+		line-height: 1.1;
 		overflow: hidden;
 		display: -webkit-box;
 		-webkit-line-clamp: 4;
@@ -1094,8 +1095,8 @@
 	}
 
 	.eq-icon {
-		width: 4rem;
-		height: 4rem;
+		width: 40px;
+		height: 40px;
 		image-rendering: pixelated;
 	}
 
