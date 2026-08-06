@@ -16,6 +16,14 @@ pub const LINES: [&str; 5] = [
 const SECTION: &str = "Socials";
 const PAGES: u32 = 10;
 const BUTTONS: u32 = 12;
+const BARS: u32 = 10;
+const HOTBAR_SECTION: &str = "HotButtons";
+
+/// `HotButtonData` is serialised `%c%d,%c%d,%s,%d,%s,%s`: type and slot, icon
+/// type and slot, item guid, item id, label, item name. The type char is
+/// `'A' + type`, so a social (type 4) is `E`, and `@-1` is icon type -1.
+const HOTBUTTON_TAIL: &str = "@-1,0000000000000000,0";
+
 const CHARACTERS_INI: &str = "_characters.ini";
 const INI_SUFFIX: &str = "_LO1.ini";
 const UI_PREFIX: &str = "UI_";
@@ -81,16 +89,29 @@ fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn take_number(value: &str) -> Option<(u32, &str)> {
-    let end = value.find(|c: char| !c.is_ascii_digit())?;
+    let end = value
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(value.len());
     Some((value[..end].parse().ok()?, &value[end..]))
 }
 
-fn slot_of(key: &str) -> Option<(Slot, &str)> {
+fn parse_slot(key: &str) -> Option<(Slot, &str)> {
     let rest = strip_prefix_ci(key.trim(), "Page")?;
     let (page, rest) = take_number(rest)?;
     let rest = strip_prefix_ci(rest, "Button")?;
     let (button, suffix) = take_number(rest)?;
-    (!suffix.is_empty()).then_some((Slot { page, button }, suffix))
+    Some((Slot { page, button }, suffix))
+}
+
+fn slot_of(key: &str) -> Option<(Slot, &str)> {
+    let (slot, suffix) = parse_slot(key)?;
+    (!suffix.is_empty()).then_some((slot, suffix))
+}
+
+/// A hotbutton key carries no suffix: `Page1Button1=E12,…`.
+fn hotbutton_slot_of(key: &str) -> Option<Slot> {
+    let (slot, suffix) = parse_slot(key)?;
+    suffix.is_empty().then_some(slot)
 }
 
 fn entry_of(line: &[u8]) -> Option<(Slot, String, String)> {
@@ -127,7 +148,149 @@ fn free_slot(entries: &[(Slot, String, String)]) -> Option<Slot> {
         })
 }
 
-pub fn apply(bytes: &[u8]) -> Result<Vec<u8>, SocialsError> {
+/// Which hotbar the button is placed on. Bar 1 is `[HotButtons]` and bars 2-10
+/// are `[HotButtons2]`…`[HotButtons10]`; bar `0` leaves every bar alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub bar: u32,
+    pub page: u32,
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Self { bar: 1, page: 1 }
+    }
+}
+
+impl Placement {
+    pub fn wanted(&self) -> bool {
+        self.bar >= 1 && self.bar <= BARS && self.page >= 1 && self.page <= PAGES
+    }
+
+    fn section(&self) -> String {
+        match self.bar {
+            1 => HOTBAR_SECTION.to_string(),
+            bar => format!("{HOTBAR_SECTION}{bar}"),
+        }
+    }
+}
+
+/// A social's slot is its zero-based index over the 12-per-page grid. From 120
+/// up the same field means an alternate advancement group instead, which the
+/// 10x12 grid cannot reach.
+fn social_index(slot: Slot) -> u32 {
+    (slot.page - 1) * BUTTONS + (slot.button - 1)
+}
+
+fn is_hotbar(name: &str) -> bool {
+    let Some(rest) = strip_prefix_ci(name.trim(), HOTBAR_SECTION) else {
+        return false;
+    };
+    rest.is_empty() || rest.parse::<u32>().is_ok()
+}
+
+/// The social index of a hotbutton that already carries our label.
+fn ours(value: &str) -> Option<u32> {
+    let fields: Vec<&str> = value.split(',').collect();
+    if fields.get(4) != Some(&NAME) {
+        return None;
+    }
+    strip_prefix_ci(fields.first()?.trim(), "E")?.parse().ok()
+}
+
+fn hotbutton_value(slot: Slot) -> String {
+    format!("E{},{HOTBUTTON_TAIL},{NAME},", social_index(slot))
+}
+
+/// An existing EQLD button is corrected wherever it already sits, on any bar;
+/// otherwise an empty button is claimed. A button holding anything else is
+/// never taken.
+fn place(
+    lines: Vec<Vec<u8>>,
+    slot: Slot,
+    placement: Placement,
+    ending: &[u8],
+) -> Result<Vec<Vec<u8>>, SocialsError> {
+    let wanted = hotbutton_value(slot);
+    let mut lines = lines;
+
+    let mut inside = false;
+    let mut existing = None;
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(name) = header_of(line) {
+            inside = is_hotbar(&name);
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let raw = text(line);
+        let Some((key, value)) = raw.split_once('=') else {
+            continue;
+        };
+        let Some(taken) = hotbutton_slot_of(key) else {
+            continue;
+        };
+        if ours(value.trim()).is_some() {
+            existing = Some((index, taken));
+            break;
+        }
+    }
+
+    if let Some((index, taken)) = existing {
+        let mut line = format!("Page{}Button{}={wanted}", taken.page, taken.button).into_bytes();
+        line.extend_from_slice(ending);
+        lines[index] = line;
+        return Ok(lines);
+    }
+
+    let name = placement.section();
+    let header = lines
+        .iter()
+        .position(|line| header_of(line).is_some_and(|found| found.eq_ignore_ascii_case(&name)));
+    let (header, end) = match header {
+        Some(header) => {
+            let end = lines[header + 1..]
+                .iter()
+                .position(|line| header_of(line).is_some())
+                .map_or(lines.len(), |offset| header + 1 + offset);
+            (header, end)
+        }
+        None => {
+            let mut section_header = format!("[{name}]").into_bytes();
+            section_header.extend_from_slice(ending);
+            lines.push(section_header);
+            (lines.len() - 1, lines.len())
+        }
+    };
+
+    let taken: Vec<Slot> = lines[header + 1..end]
+        .iter()
+        .filter_map(|line| {
+            let raw = text(line);
+            let (key, value) = raw.split_once('=')?;
+            let slot = hotbutton_slot_of(key)?;
+            (!value.trim().is_empty()).then_some(slot)
+        })
+        .collect();
+    let free = (1..=BUTTONS)
+        .map(|button| Slot {
+            page: placement.page,
+            button,
+        })
+        .find(|slot| !taken.contains(slot))
+        .ok_or(SocialsError::NoFreeHotbutton {
+            bar: placement.bar,
+            page: placement.page,
+        })?;
+
+    let mut line = format!("Page{}Button{}={wanted}", free.page, free.button).into_bytes();
+    line.extend_from_slice(ending);
+    lines.insert(end, line);
+    Ok(lines)
+}
+
+pub fn apply(bytes: &[u8], placement: Placement) -> Result<Vec<u8>, SocialsError> {
     let lines = split_lines(bytes);
     let ending = line_ending(&lines).to_vec();
 
@@ -205,6 +368,9 @@ pub fn apply(bytes: &[u8]) -> Result<Vec<u8>, SocialsError> {
     let mut out: Vec<Vec<u8>> = head;
     out.extend(kept);
     out.extend(tail);
+    if placement.wanted() {
+        out = place(out, slot, placement, &ending)?;
+    }
     let last = out.len().saturating_sub(1);
     for line in out.iter_mut().take(last) {
         if !line.ends_with(b"\n") {
@@ -301,13 +467,13 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-pub fn install_file(path: &Path) -> Result<Outcome, SocialsError> {
+pub fn install_file(path: &Path, placement: Placement) -> Result<Outcome, SocialsError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Outcome::Missing),
         Err(err) => return Err(SocialsError::Io(path.to_path_buf(), err)),
     };
-    let next = apply(&bytes)?;
+    let next = apply(&bytes, placement)?;
     if next == bytes {
         return Ok(Outcome::Unchanged);
     }
@@ -319,12 +485,12 @@ pub fn install_file(path: &Path) -> Result<Outcome, SocialsError> {
     Ok(Outcome::Written)
 }
 
-pub fn install(root: &Path) -> Vec<Result<Report, SocialsError>> {
+pub fn install(root: &Path, placement: Placement) -> Vec<Result<Report, SocialsError>> {
     characters(root)
         .into_iter()
         .map(|(character, server)| {
             let path = root.join(ini_name(&character, &server));
-            install_file(&path).map(|outcome| Report {
+            install_file(&path, placement).map(|outcome| Report {
                 character,
                 server,
                 path,
@@ -355,7 +521,8 @@ pub fn run(config: &Config, args: &[String]) -> Result<(), SocialsError> {
     }
 
     let root = &config.game.root;
-    let reports = install(root);
+    let placement = config.socials.placement();
+    let reports = install(root, placement);
     if reports.is_empty() {
         println!("no characters found under {}", root.display());
         return Ok(());
@@ -391,6 +558,11 @@ pub enum SocialsError {
     GameRunning,
     #[error("every social slot is taken by something else")]
     NoFreeSlot,
+    #[error(
+        "every button of hotbar {bar} page {page} is taken by something else; \
+         point [socials] bar/page at a free one, or set bar = 0 to leave the bars alone"
+    )]
+    NoFreeHotbutton { bar: u32, page: u32 },
     #[error("io on {0}: {1}")]
     Io(PathBuf, #[source] std::io::Error),
 }
@@ -400,6 +572,16 @@ mod tests {
     use super::*;
 
     const REAL: &[u8] = include_bytes!("../../../fixtures/ini/Dorsk_erudin_LO1.ini");
+    const BAR1: Placement = Placement { bar: 1, page: 1 };
+    const NO_BAR: Placement = Placement { bar: 0, page: 0 };
+
+    fn section(bytes: &[u8], name: &str) -> Vec<String> {
+        sections(bytes)
+            .into_iter()
+            .find(|(found, _)| found.eq_ignore_ascii_case(name))
+            .map(|(_, body)| body)
+            .unwrap_or_default()
+    }
 
     fn sections(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
         let mut sections: Vec<(String, Vec<String>)> = Vec::new();
@@ -427,7 +609,7 @@ mod tests {
     #[test]
     fn the_real_character_ini_keeps_every_other_section_byte_identical() {
         let before = sections(REAL);
-        let after = sections(&apply(REAL).unwrap());
+        let after = sections(&apply(REAL, BAR1).unwrap());
         assert_eq!(
             before.iter().map(|(name, _)| name).collect::<Vec<_>>(),
             after.iter().map(|(name, _)| name).collect::<Vec<_>>(),
@@ -443,7 +625,7 @@ mod tests {
 
     #[test]
     fn the_existing_eqld_social_is_updated_in_place() {
-        let out = apply(REAL).unwrap();
+        let out = apply(REAL, BAR1).unwrap();
         assert_eq!(
             socials(&out),
             vec![
@@ -458,13 +640,135 @@ mod tests {
             "the slot the user already bound a hotbutton to is reused"
         );
         assert!(String::from_utf8(out.clone()).unwrap().ends_with("\r\n"));
-        assert_eq!(apply(&out).unwrap(), out, "applying twice changes nothing");
+        assert_eq!(
+            apply(&out, BAR1).unwrap(),
+            out,
+            "applying twice changes nothing"
+        );
+    }
+
+    #[test]
+    fn the_hotbutton_the_user_already_has_is_recognised_and_left_where_it_is() {
+        let out = apply(REAL, BAR1).unwrap();
+        assert_eq!(
+            section(&out, "HotButtons4"),
+            section(REAL, "HotButtons4"),
+            "the bar the user put it on is reproduced byte for byte"
+        );
+        assert!(
+            section(&out, "HotButtons4")
+                .contains(&"Page1Button1=E12,@-1,0000000000000000,0,EQLD,".to_string()),
+            "{:?}",
+            section(&out, "HotButtons4")
+        );
+        assert_eq!(
+            section(&out, HOTBAR_SECTION),
+            section(REAL, HOTBAR_SECTION),
+            "no second button is added to the configured bar 1"
+        );
+    }
+
+    #[test]
+    fn a_social_that_moved_slot_drags_its_hotbutton_with_it() {
+        let ini = b"[Socials]\r\nPage1Button1Name=EQLD\r\n\
+                    [HotButtons3]\r\nPage1Button7=E99,@-1,0000000000000000,0,EQLD,\r\n";
+        let out = String::from_utf8(apply(ini, BAR1).unwrap()).unwrap();
+        assert!(
+            out.contains("Page1Button7=E0,@-1,0000000000000000,0,EQLD,"),
+            "the stale index is corrected where the button already sits: {out:?}"
+        );
+        assert!(
+            !out.contains("[HotButtons]"),
+            "and it is not duplicated onto bar 1: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_button_holding_something_else_is_never_taken() {
+        let ini = b"[Socials]\r\nPage1Button1Name=EQLD\r\n\
+                    [HotButtons]\r\nPage1Button1=B0,@-1,0000000000000000,0,Melee,\r\n\
+                    Page1Button2=,\r\n";
+        let out = String::from_utf8(apply(ini, BAR1).unwrap()).unwrap();
+        assert!(
+            out.contains("Page1Button1=B0,@-1,0000000000000000,0,Melee,"),
+            "{out:?}"
+        );
+        assert!(
+            out.contains("Page1Button3=E0,@-1,0000000000000000,0,EQLD,"),
+            "button 2 holds a bare comma, which is not empty: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_full_hotbar_page_is_an_error_not_a_stolen_button() {
+        let mut ini = String::from("[Socials]\r\nPage1Button1Name=EQLD\r\n[HotButtons2]\r\n");
+        for button in 1..=BUTTONS {
+            ini.push_str(&format!(
+                "Page1Button{button}=J30,@-1,0000000000000000,0,Kick,\r\n"
+            ));
+        }
+        let placement = Placement { bar: 2, page: 1 };
+        assert!(matches!(
+            apply(ini.as_bytes(), placement),
+            Err(SocialsError::NoFreeHotbutton { bar: 2, page: 1 })
+        ));
+
+        assert!(
+            apply(ini.as_bytes(), Placement { bar: 2, page: 2 }).is_ok(),
+            "another page of the same bar is still free"
+        );
+    }
+
+    #[test]
+    fn a_social_never_indexes_into_the_alternate_advancement_range() {
+        let highest = Slot {
+            page: PAGES,
+            button: BUTTONS,
+        };
+        assert_eq!(social_index(Slot { page: 1, button: 1 }), 0);
+        assert_eq!(social_index(Slot { page: 2, button: 1 }), 12);
+        assert_eq!(social_index(highest), 119, "120 and up mean an AA group");
+    }
+
+    #[test]
+    fn every_bar_maps_to_the_section_the_client_writes() {
+        assert_eq!(Placement { bar: 1, page: 1 }.section(), "HotButtons");
+        assert_eq!(Placement { bar: 4, page: 1 }.section(), "HotButtons4");
+        assert_eq!(Placement { bar: 10, page: 1 }.section(), "HotButtons10");
+        assert!(Placement::default().wanted());
+        assert!(!NO_BAR.wanted(), "bar 0 is the opt out");
+        assert!(
+            !Placement { bar: 11, page: 1 }.wanted(),
+            "there are ten bars"
+        );
+        assert!(!Placement { bar: 1, page: 11 }.wanted());
+
+        assert!(is_hotbar("HotButtons"));
+        assert!(is_hotbar("HotButtons4"));
+        assert!(!is_hotbar("HotButtonsWnd"));
+        assert!(!is_hotbar("Socials"));
+    }
+
+    #[test]
+    fn only_a_button_carrying_our_label_is_claimed_as_ours() {
+        assert_eq!(ours("E12,@-1,0000000000000000,0,EQLD,"), Some(12));
+        assert_eq!(
+            ours("E451,@-1,0000000000000000,0,,"),
+            None,
+            "an unnamed alternate advancement button is not ours"
+        );
+        assert_eq!(ours("E6120,@-1,0000000000000000,0,Bazaar Portal,"), None);
+        assert_eq!(
+            ours("J30,@-1,0000000000000000,0,EQLD,"),
+            None,
+            "a skill the user happened to label EQLD is not a social"
+        );
     }
 
     #[test]
     fn a_social_the_user_named_is_never_overwritten() {
         let ini = b"[Socials]\r\nPage1Button1Name=Sit\r\nPage1Button1Line1=/sit\r\n".to_vec();
-        let out = apply(&ini).unwrap();
+        let out = apply(&ini, BAR1).unwrap();
         assert_eq!(
             socials(&out),
             vec![
@@ -484,20 +788,22 @@ mod tests {
     #[test]
     fn a_missing_socials_section_is_appended_with_the_first_slot() {
         let ini = b"[Defaults]\r\nMusic=10\r\n".to_vec();
-        let out = apply(&ini).unwrap();
+        let out = apply(&ini, BAR1).unwrap();
         assert_eq!(
             String::from_utf8(out.clone()).unwrap(),
             "[Defaults]\r\nMusic=10\r\n[Socials]\r\nPage1Button1Name=EQLD\r\n\
              Page1Button1Color=18\r\nPage1Button1Line1=/log on\r\nPage1Button1Line2=/who\r\n\
              Page1Button1Line3=/outputfile inventory\r\nPage1Button1Line4=/outputfile spellbook\r\n\
-             Page1Button1Line5=/outputfile missingspells\r\n"
+             Page1Button1Line5=/outputfile missingspells\r\n\
+             [HotButtons]\r\nPage1Button1=E0,@-1,0000000000000000,0,EQLD,\r\n",
+            "the first social slot is index zero, and the bar is created for it"
         );
-        assert_eq!(apply(&out).unwrap(), out);
+        assert_eq!(apply(&out, BAR1).unwrap(), out);
     }
 
     #[test]
     fn a_file_that_does_not_end_in_a_newline_is_terminated_before_appending() {
-        let out = apply(b"[Defaults]\r\nMusic=10").unwrap();
+        let out = apply(b"[Defaults]\r\nMusic=10", BAR1).unwrap();
         assert!(String::from_utf8(out)
             .unwrap()
             .contains("Music=10\r\n[Socials]"));
@@ -505,21 +811,34 @@ mod tests {
 
     #[test]
     fn bare_newlines_are_kept_bare() {
-        let out = apply(b"[Socials]\nPage1Button1Name=EQLD\n").unwrap();
+        let out = apply(b"[Socials]\nPage1Button1Name=EQLD\n", BAR1).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(!out.contains('\r'), "{out:?}");
-        assert!(out.ends_with("Page1Button1Line5=/outputfile missingspells\n"));
+        assert!(
+            out.ends_with("[HotButtons]\nPage1Button1=E0,@-1,0000000000000000,0,EQLD,\n"),
+            "{out:?}"
+        );
     }
 
     #[test]
     fn the_social_stays_where_it_is_even_with_later_sections_behind_it() {
         let ini = b"[Socials]\r\nPage3Button4Name=EQLD\r\n[Friends]\r\nSendToUChat=0\r\n";
-        let out = String::from_utf8(apply(ini).unwrap()).unwrap();
+        let out = String::from_utf8(apply(ini, BAR1).unwrap()).unwrap();
         assert!(
-            out.ends_with(
+            out.contains(
                 "Page3Button4Line5=/outputfile missingspells\r\n[Friends]\r\nSendToUChat=0\r\n"
             ),
             "{out:?}"
+        );
+        assert!(
+            out.ends_with("[HotButtons]\r\nPage1Button1=E27,@-1,0000000000000000,0,EQLD,\r\n"),
+            "page 3 button 4 is index (3-1)*12+3 = 27: {out:?}"
+        );
+
+        let untouched = String::from_utf8(apply(ini, NO_BAR).unwrap()).unwrap();
+        assert!(
+            !untouched.contains("HotButtons"),
+            "bar 0 leaves every hotbar alone: {untouched:?}"
         );
     }
 
@@ -529,7 +848,7 @@ mod tests {
             b"[Socials]\r\nPage1Button1Name=EQLD\r\nPage1Button1Line1=/outputfile inventory\r\n\
                     Page1Button1Line1=/rude\r\nPage1Button1Color=7\r\n";
         assert_eq!(
-            socials(&apply(ini).unwrap()),
+            socials(&apply(ini, BAR1).unwrap()),
             vec![
                 "Page1Button1Name=EQLD",
                 "Page1Button1Line1=/log on",
@@ -552,7 +871,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            apply(ini.as_bytes()),
+            apply(ini.as_bytes(), BAR1),
             Err(SocialsError::NoFreeSlot)
         ));
     }
@@ -572,6 +891,17 @@ mod tests {
         assert_eq!(slot_of("Page2Button1"), None);
         assert_eq!(slot_of("PageButton1Name"), None);
         assert_eq!(slot_of("SpellLoadout1.name"), None);
+
+        assert_eq!(
+            hotbutton_slot_of("Page1Button12"),
+            Some(Slot {
+                page: 1,
+                button: 12
+            }),
+            "a hotbutton key ends on the number, with no suffix to find"
+        );
+        assert_eq!(hotbutton_slot_of("Page1Button1Name"), None);
+        assert_eq!(hotbutton_slot_of("Page1Button"), None);
     }
 
     #[test]
@@ -580,18 +910,18 @@ mod tests {
         let path = dir.path().join(ini_name("Dorsk", "erudin"));
         std::fs::write(&path, REAL).unwrap();
 
-        assert_eq!(install_file(&path).unwrap(), Outcome::Written);
+        assert_eq!(install_file(&path, BAR1).unwrap(), Outcome::Written);
         assert_eq!(std::fs::read(sibling(&path, BACKUP_SUFFIX)).unwrap(), REAL);
         assert!(!sibling(&path, TEMP_SUFFIX).exists());
-        assert_eq!(std::fs::read(&path).unwrap(), apply(REAL).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), apply(REAL, BAR1).unwrap());
 
         assert_eq!(
-            install_file(&path).unwrap(),
+            install_file(&path, BAR1).unwrap(),
             Outcome::Unchanged,
             "a second run neither writes nor re-backs-up"
         );
         assert_eq!(
-            install_file(&dir.path().join("Nobody_erudin_LO1.ini")).unwrap(),
+            install_file(&dir.path().join("Nobody_erudin_LO1.ini"), BAR1).unwrap(),
             Outcome::Missing
         );
     }
@@ -631,7 +961,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join(ini_name("Dorsk", "erudin")), REAL).unwrap();
 
-        let reports: Vec<Report> = install(dir.path())
+        let reports: Vec<Report> = install(dir.path(), BAR1)
             .into_iter()
             .map(Result::unwrap)
             .collect();

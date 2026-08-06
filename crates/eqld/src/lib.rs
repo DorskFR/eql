@@ -11,6 +11,7 @@ pub mod icons;
 pub mod install;
 pub mod lock;
 pub mod logs;
+pub mod notice;
 pub mod overlays;
 pub mod skin;
 pub mod socials;

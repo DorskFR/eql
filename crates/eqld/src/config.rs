@@ -35,10 +35,41 @@ impl LogConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SocialsConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_socials_bar")]
+    pub bar: u32,
+    #[serde(default = "default_socials_page")]
+    pub page: u32,
+}
+
+impl Default for SocialsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bar: default_socials_bar(),
+            page: default_socials_page(),
+        }
+    }
+}
+
+impl SocialsConfig {
+    pub fn placement(&self) -> crate::socials::Placement {
+        crate::socials::Placement {
+            bar: self.bar,
+            page: self.page,
+        }
+    }
+}
+
+fn default_socials_bar() -> u32 {
+    1
+}
+
+fn default_socials_page() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -76,13 +107,17 @@ pub struct ToolsConfig {
     pub log_reader: LogReaderConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LogReaderConfig {
     #[serde(default)]
     pub enabled: bool,
     pub exe: Option<PathBuf>,
     pub repo: Option<String>,
     pub version: Option<String>,
+    /// Unlike the social and the skin, the installer writes only into its own
+    /// directory and never the game root, so it does not wait for the client.
+    #[serde(default = "default_auto_install")]
+    pub auto_install: bool,
     #[serde(default = "default_replay_secs")]
     pub replay_secs: u64,
     #[serde(default = "default_replay_timeout_secs")]
@@ -129,6 +164,27 @@ impl LogReaderConfig {
     pub fn replay_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.replay_timeout_secs.max(10))
     }
+}
+
+impl Default for LogReaderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            exe: None,
+            repo: None,
+            version: None,
+            auto_install: default_auto_install(),
+            replay_secs: default_replay_secs(),
+            replay_timeout_secs: default_replay_timeout_secs(),
+            overlays: Vec::new(),
+            hidden: Vec::new(),
+            atlas: AtlasMode::default(),
+        }
+    }
+}
+
+fn default_auto_install() -> bool {
+    true
 }
 
 fn default_replay_secs() -> u64 {
@@ -859,6 +915,81 @@ mod tests {
         assert_eq!(merged.tools.log_reader.hidden, ["friend"]);
         assert_eq!(merged.tools.log_reader.atlas, AtlasMode::Overlay);
         assert!(merged.socials.enabled);
+    }
+
+    #[test]
+    fn the_log_reader_installs_itself_unless_that_is_turned_off() {
+        let with = |tools: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                [api]
+                url = "u"
+                token = "t"
+                {tools}
+                "#
+            ))
+            .unwrap()
+        };
+        assert!(
+            with("[tools.log_reader]\nenabled = true")
+                .tools
+                .log_reader
+                .auto_install,
+            "asking for the reader asks for it to be there"
+        );
+        assert!(
+            !with("[tools.log_reader]\nenabled = true\nauto_install = false")
+                .tools
+                .log_reader
+                .auto_install
+        );
+        assert!(
+            with("").tools.log_reader.auto_install,
+            "an absent section still carries the default"
+        );
+        assert!(
+            with("")
+                .frozen_changes(&with("[tools.log_reader]\nauto_install = false"))
+                .is_empty(),
+            "it is hot-swappable like the rest of the section"
+        );
+    }
+
+    #[test]
+    fn the_social_button_lands_on_the_first_hotbar_unless_it_is_pointed_elsewhere() {
+        let with = |socials: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                [api]
+                url = "u"
+                token = "t"
+                {socials}
+                "#
+            ))
+            .unwrap()
+        };
+        let default = with("[socials]\nenabled = true");
+        assert_eq!(default.socials.bar, 1);
+        assert_eq!(default.socials.page, 1);
+        assert!(default.socials.placement().wanted());
+
+        let elsewhere = with("[socials]\nenabled = true\nbar = 4\npage = 2");
+        assert_eq!(
+            elsewhere.socials.placement(),
+            crate::socials::Placement { bar: 4, page: 2 }
+        );
+
+        assert!(
+            !with("[socials]\nenabled = true\nbar = 0")
+                .socials
+                .placement()
+                .wanted(),
+            "bar 0 asks for the social without a hotbutton"
+        );
     }
 
     #[test]

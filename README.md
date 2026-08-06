@@ -36,6 +36,8 @@ hidden = ["dps"]            # …of which these run without a window
 
 [socials]
 enabled = false             # keep the in-game EQLD button applied
+# bar = 1                   # hotbar it is placed on (0 = leave the bars alone)
+# page = 1
 
 [skin]
 enabled = false             # keep the installed skin up to date
@@ -46,8 +48,9 @@ layout = "dorskui"
 |---|---|---|
 | `enabled` | `false` | Ship the JSON the reader writes, and (in `atlas = "replay"`) run `eql_atlas --replay` each tick. |
 | `exe` | discovered | Path to `eql_atlas`; the other tools are found next to it. |
-| `repo` | `DorskFR/eql` | GitHub repo `install-tools` fetches the reader from. Set it to `blastlaster/eql-log-reader` for stock upstream. |
+| `repo` | `DorskFR/eql` | GitHub repo the reader is fetched from. Set it to `blastlaster/eql-log-reader` for stock upstream. |
 | `version` | `latest` | Release of `repo` to fetch; a tag, or `latest` for its newest release. |
+| `auto_install` | `true` | Fetch and install the reader when it is wanted and missing, instead of only warning. |
 | `replay_secs` | `120` | Seconds between replays (min 10). |
 | `replay_timeout_secs` | `600` | Kill a replay that outlives this (min 10). |
 | `overlays` | `[]` | Overlays to supervise: `dps`, `session_report`, `friend`, `atlas`. |
@@ -59,6 +62,8 @@ And outside `[tools.log_reader]`:
 | Key | Default | What |
 |---|---|---|
 | `game.process` | `eqgame.exe` | The client's name in the process list. Set it to `""` to say it cannot be seen at all. |
+| `socials.bar` | `1` | Hotbar the EQLD button is placed on, 1-10. `0` installs the social but touches no bar. |
+| `socials.page` | `1` | Page of that hotbar, 1-10. |
 | `skin.enabled` | `false` | Keep the installed skin up to date from the API. |
 | `skin.layout` | — | The layout to install; required when `skin.enabled` is on. |
 | `skin.name` | layout's default | A named skin inside that layout, like `--skin` on the subcommand. |
@@ -74,9 +79,9 @@ listed and still healthy is left alone rather than restarted.
 
 | Hot | Restart required |
 |---|---|
-| everything under `[tools.log_reader]`: `enabled`, `exe`, `repo`, `version`, `replay_secs`, `replay_timeout_secs`, `overlays`, `hidden`, `atlas` | `game.root` |
+| everything under `[tools.log_reader]`: `enabled`, `exe`, `repo`, `version`, `auto_install`, `replay_secs`, `replay_timeout_secs`, `overlays`, `hidden`, `atlas` | `game.root` |
 | everything under `[harvest]`: `enabled`, `dir` | `game.poll_secs` |
-| `[socials] enabled` | |
+| everything under `[socials]`: `enabled`, `bar`, `page` | |
 | everything under `[skin]` | |
 | `game.process` | |
 | | `api.url`, `api.token` |
@@ -208,6 +213,46 @@ file is copied to `<name>.eqld.bak` before a write. A character in
 `_characters.ini` who has never logged in has no ini yet and is reported as
 such.
 
+#### …on a hotbar, not just in the socials list
+
+A social in `[Socials]` is not on screen: you still have to open the socials
+window and drag it onto a bar, which on a phone with no mouse is the thing the
+button exists to avoid. So eqld also writes the hotbutton, into
+`[HotButtons]` — bar 1, page 1 by default:
+
+```
+[HotButtons]
+Page1Button5=E12,@-1,0000000000000000,0,EQLD,
+```
+
+The client serialises a hotbutton as `%c%d,%c%d,%s,%d,%s,%s`: type and slot,
+icon type and slot, item guid, item id, label, item name. The type character is
+`'A' + type`, so a social (type 4) is `E` and `@-1` is "no custom icon". The
+slot is the social's **zero-based** index over the 12-per-page grid, so
+`Page2Button1` in `[Socials]` is `(2-1)*12 + (1-1) = 12` → `E12`. From 120 up
+that same field means an alternate advancement ability instead — which is what
+the unlabelled `E451` and `E6120` entries in a real ini are — and the 10x12
+social grid tops out at 119, so the two can never collide.
+
+Bars are `[HotButtons]` for bar 1 and `[HotButtons2]`…`[HotButtons10]` for the
+rest; each has ten pages of twelve buttons. Point the button somewhere else
+with:
+
+```toml
+[socials]
+enabled = true
+bar = 4
+page = 1
+```
+
+A button that already holds something else is never taken — the first *empty*
+button of that page is claimed, and if all twelve are full eqld says so and
+writes nothing rather than clobbering one. An EQLD button you have already
+placed is found on **any** bar and left where it is, so moving it in game
+sticks; if the social itself moves slot, the index on that button is corrected
+rather than a second button being added. `bar = 0` installs the social and
+leaves every hotbar alone.
+
 `[socials] enabled = true` puts the same work on the daemon's tick, which is
 what makes it stick: the client rewrites the file on every exit, and the daemon
 re-applies it the moment the game is gone. It is off by default — this edits a
@@ -244,6 +289,18 @@ tracked-quest list from the command line; and `eql_fights_cli`, which dumps a
 log's completed fights as JSON. `install-tools` fetches that build by
 default; `[tools.log_reader] repo` points back at upstream if you would rather
 have stock.
+
+The daemon installs it for you. With `enabled = true` (or any overlay listed)
+and no reader on the machine, the first tick downloads the release asset and
+runs it — the Inno installer on Windows, the tarball's `install.sh` elsewhere —
+and then rewires replay, fights and the overlays without a restart. Unlike the
+social and the skin this does **not** wait for the client to exit: the installer
+only ever writes into its own directory, never the game root, and waiting would
+mean a whole session harvested by nothing. A failed install is logged once with
+the reason and retried on a backoff that doubles from one minute to one hour, so
+a machine that is offline does not fill the console. `auto_install = false`
+turns it off and goes back to warning once and doing nothing; `install-tools`,
+with or without `--force`, is unchanged either way.
 
 ### Lifetime stats without a window on screen
 
