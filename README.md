@@ -10,7 +10,7 @@ Tickets live in the YouTrack `EQL` project.
 | Path | What |
 |---|---|
 | `crates/eql-core` | Shared types + parsers (inventory dumps, layouts) |
-| `crates/eqld` | Daemon: watches game folder, uploads, installs skins |
+| `crates/eqld` | Daemon: watches game folder, uploads, installs skins and the in-game social |
 | `crates/eqls` | Server: ingest API, item DB, stat engine, web UI |
 | `fixtures/` | Sample game artifacts (skin XMLs, layout, ini) used by tests |
 | `vendor/eql-log-reader` | Our patch to upstream's log reader, and the commit it applies to |
@@ -33,6 +33,9 @@ token = "…"
 enabled = true              # harvest headlessly via `eql_atlas --replay`
 overlays = ["dps"]          # in-game windows to launch alongside it
 hidden = ["dps"]            # …of which these run without a window
+
+[socials]
+enabled = false             # keep the in-game EQLD button applied
 ```
 
 | Key | Default | What |
@@ -59,6 +62,7 @@ listed and still healthy is left alone rather than restarted.
 |---|---|
 | everything under `[tools.log_reader]`: `enabled`, `exe`, `repo`, `version`, `replay_secs`, `replay_timeout_secs`, `overlays`, `hidden`, `atlas` | `game.root` |
 | everything under `[harvest]`: `enabled`, `dir` | `game.poll_secs` |
+| `[socials] enabled` | |
 | | `api.url`, `api.token` |
 | | `state.path` |
 
@@ -66,6 +70,43 @@ A restart-only field that changed is logged as such and the running value is
 kept, so nothing is applied by halves. A config file that does not parse is
 logged once and ignored: the daemon keeps running on the last one that worked,
 and picks up the next edit that fixes it.
+
+### The in-game EQLD button
+
+```sh
+eqld <config.toml> install-social
+```
+
+Writes one social named `EQLD` into every character's
+`<game.root>/<Character>_<server>_LO1.ini`, so everything the daemon reads is
+one click away in game:
+
+```
+/log on
+/who
+/outputfile inventory
+/outputfile spellbook
+/outputfile missingspells
+```
+
+That is a social's whole capacity — the client's own `EQUI_SocialEditWnd.xml`
+defines five lines — and `/log on` has to lead, because with logging off none of
+the rest is observable. **The game must be closed**: the client owns that file
+and rewrites it when it exits, so anything written mid-session is thrown away.
+eqld refuses to write while `eqgame.exe` is running.
+
+An existing social named `EQLD` is updated where it is, keeping the colour you
+picked and any hotbutton already bound to that slot; otherwise the first slot
+that holds nothing is claimed. A social you named something else is never
+touched, every other section of the file is carried over byte for byte, and the
+file is copied to `<name>.eqld.bak` before a write. A character in
+`_characters.ini` who has never logged in has no ini yet and is reported as
+such.
+
+`[socials] enabled = true` puts the same work on the daemon's tick, which is
+what makes it stick: the client rewrites the file on every exit, and the daemon
+re-applies it the moment the game is gone. It is off by default — this edits a
+file you own.
 
 ### Item icons
 

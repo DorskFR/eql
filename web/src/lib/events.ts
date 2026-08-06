@@ -8,7 +8,8 @@ const TONES: Record<string, Tone> = {
 	zone: 'neutral',
 	death: 'danger',
 	location: 'neutral',
-	skill: 'info'
+	skill: 'info',
+	who: 'info'
 };
 
 export function eventTone(event: LogEvent): Tone {
@@ -32,6 +33,10 @@ export function describeEvent(event: LogEvent): string {
 			return `At ${coord(payload.y)}, ${coord(payload.x)}, ${coord(payload.z)}`;
 		case 'skill':
 			return `${payload.skill ?? 'A skill'} improved to ${payload.value ?? '?'}`;
+		case 'who':
+			return `Level ${payload.level ?? '?'} ${(payload.classes ?? []).join('/')}${
+				payload.race ? ` ${payload.race}` : ''
+			}`.trim();
 		default:
 			return event.kind;
 	}

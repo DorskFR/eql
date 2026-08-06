@@ -102,6 +102,7 @@ pub struct TickReport {
     pub harvested: usize,
     pub harvest_skipped: usize,
     pub fights: usize,
+    pub socials: usize,
 }
 
 /// One tick reads at most this much of each log; the rest waits for the next
@@ -146,6 +147,7 @@ pub struct Daemon {
     overlays: Option<crate::overlays::Supervisor>,
     processes: crate::overlays::ProcessWatch,
     config_watch: Option<crate::config::Watch>,
+    socials_note: Option<String>,
 }
 
 impl Daemon {
@@ -220,6 +222,7 @@ impl Daemon {
             overlays,
             processes: crate::overlays::ProcessWatch::new(),
             config_watch: None,
+            socials_note: None,
         })
     }
 
@@ -457,6 +460,54 @@ impl Daemon {
         }
     }
 
+    /// The client rewrites the character ini when it exits, so a social
+    /// written during a session is thrown away: only write with the game shut.
+    fn install_socials(&mut self, root: &Path, report: &mut TickReport) {
+        if !self.config.socials.enabled {
+            self.socials_note = None;
+            return;
+        }
+        if self.processes.is_running(crate::overlays::GAME_PROCESS) {
+            self.note_socials("the game is running; the social will be applied once it exits");
+            return;
+        }
+
+        let mut notes = Vec::new();
+        for outcome in crate::socials::install(root) {
+            match outcome {
+                Ok(entry) => match entry.outcome {
+                    crate::socials::Outcome::Written => {
+                        report.socials += 1;
+                        tracing::info!(
+                            character = %entry.character,
+                            server = %entry.server,
+                            file = %entry.path.display(),
+                            social = crate::socials::NAME,
+                            "installed the in-game social"
+                        );
+                    }
+                    crate::socials::Outcome::Unchanged => {}
+                    crate::socials::Outcome::Missing => {
+                        notes.push(format!("{} has no character ini yet", entry.character))
+                    }
+                },
+                Err(err) => notes.push(err.to_string()),
+            }
+        }
+        match notes.is_empty() {
+            true => self.socials_note = None,
+            false => self.note_socials(&notes.join("; ")),
+        }
+    }
+
+    fn note_socials(&mut self, note: &str) {
+        if self.socials_note.as_deref() == Some(note) {
+            return;
+        }
+        tracing::info!(note, "in-game social not applied");
+        self.socials_note = Some(note.to_string());
+    }
+
     async fn supervise_overlays(&mut self, root: &Path) {
         let Self {
             overlays: Some(supervisor),
@@ -542,6 +593,7 @@ impl Daemon {
         dirty_state |= logs_dirty;
 
         dirty_state |= self.run_replay(&root, &mut report).await;
+        self.install_socials(&root, &mut report);
         self.supervise_overlays(&root).await;
 
         let mut harvest_files = None;
@@ -785,7 +837,7 @@ impl Daemon {
             file.seek(SeekFrom::Start(offset))?;
             file.take(MAX_LOG_CHUNK).read_to_end(&mut chunk)?;
         }
-        let (harvest, consumed) = logs::harvest(&chunk);
+        let (harvest, consumed) = logs::harvest(&chunk, &character);
         if consumed == 0 {
             if dirty {
                 self.state.logs.insert(file_name, LogState { offset });
