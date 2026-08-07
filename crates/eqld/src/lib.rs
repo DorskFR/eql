@@ -1,4 +1,5 @@
 pub mod backoff;
+pub mod channel;
 pub mod config;
 #[cfg(windows)]
 pub mod ctrl;

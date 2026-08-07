@@ -681,15 +681,17 @@ impl Daemon {
             self.last_export_check = None;
             return false;
         }
-        let Some(channel) = settings
+        let direct = settings
             .layout
             .as_deref()
             .map(str::trim)
-            .filter(|l| !l.is_empty())
-        else {
-            self.note_export("[skin] export is on but no layout is named to size it against");
+            .filter(|l| !l.is_empty());
+        if direct.is_none() && settings.channel().is_none() {
+            self.note_export(
+                "[skin] export is on but no layout or channel names what to size it against",
+            );
             return false;
-        };
+        }
         if self
             .last_export_check
             .is_some_and(|at| at.elapsed() < settings.check_interval())
@@ -702,11 +704,34 @@ impl Daemon {
             self.note_export(&crate::export::ExportError::NoResolution.to_string());
             return false;
         };
-        if !matches!(&self.export_sizes, Some((named, _)) if named == channel) {
-            match crate::export::sizes_for(&self.config, channel).await {
-                Ok(sizes) => self.export_sizes = Some((channel.to_string(), sizes)),
+        let (source, target) = match settings.channel() {
+            Some(channel) => {
+                let names = match crate::channel::list(&self.config).await {
+                    Ok(names) => names,
+                    Err(err) => {
+                        self.note_export(&format!("cannot list layouts for {channel}: {err}"));
+                        return false;
+                    }
+                };
+                let Some(variant) = crate::channel::pick(&names, channel, screen) else {
+                    self.note_export(&format!(
+                        "no variant of {channel} matches {}x{} to size the export against",
+                        screen.0, screen.1
+                    ));
+                    return false;
+                };
+                (
+                    variant.to_string(),
+                    Some(crate::channel::variant_name(channel, screen.0, screen.1)),
+                )
+            }
+            None => (direct.unwrap_or_default().to_string(), None),
+        };
+        if !matches!(&self.export_sizes, Some((named, _)) if *named == source) {
+            match crate::export::sizes_for(&self.config, &source).await {
+                Ok(sizes) => self.export_sizes = Some((source.clone(), sizes)),
                 Err(err) => {
-                    self.note_export(&format!("cannot read the {channel} layout: {err}"));
+                    self.note_export(&format!("cannot read the {source} layout: {err}"));
                     return false;
                 }
             }
@@ -721,7 +746,12 @@ impl Daemon {
         for (character, server) in crate::socials::characters(root) {
             let key = format!("{character}_{server}");
             let export = match crate::export::read(root, &character, &server, &sizes, screen, now) {
-                Ok(Some(export)) => export,
+                Ok(Some(mut export)) => {
+                    if let Some(target) = &target {
+                        export.name = target.clone();
+                    }
+                    export
+                }
                 Ok(None) => continue,
                 Err(err) => {
                     notes.push(err.to_string());
@@ -771,6 +801,36 @@ impl Daemon {
     /// The skin install writes the very ini the exporter watches. Without
     /// adopting that write as already-seen, every install would bounce straight
     /// back up as a fresh timestamped layout.
+    /// The skin folder is named for the channel, not the variant, so the same
+    /// `/loadskin <channel>` works on every machine whatever it resolved to.
+    async fn resolve_channel(&mut self, root: &Path, channel: &str) -> Option<skin::Args> {
+        let screen = self
+            .config
+            .skin
+            .screen
+            .or_else(|| crate::export::resolution(root))?;
+        let names = match crate::channel::list(&self.config).await {
+            Ok(names) => names,
+            Err(err) => {
+                self.note_skin(&format!("cannot list layouts for {channel}: {err}"));
+                return None;
+            }
+        };
+        let Some(variant) = crate::channel::pick(&names, channel, screen) else {
+            self.note_skin(&format!(
+                "no variant of {channel} matches {}x{}; add {}",
+                screen.0,
+                screen.1,
+                crate::channel::variant_name(channel, screen.0, screen.1)
+            ));
+            return None;
+        };
+        Some(skin::Args {
+            layout: variant.to_string(),
+            skin: Some(channel.to_string()),
+        })
+    }
+
     fn seed_exports(&mut self, root: &Path) {
         if !self.config.skin.export {
             return;
@@ -825,10 +885,13 @@ impl Daemon {
             self.last_skin_check = None;
             return false;
         }
-        let Some(layout) = settings.wanted().map(str::trim).filter(|l| !l.is_empty()) else {
-            self.note_skin("[skin] enabled is on but no layout is named; nothing to install");
+        let direct = settings.wanted().map(str::trim).filter(|l| !l.is_empty());
+        if direct.is_none() && settings.channel().is_none() {
+            self.note_skin(
+                "[skin] enabled is on but no layout or channel is named; nothing to install",
+            );
             return false;
-        };
+        }
         match game {
             Game::Closed => {}
             Game::Running => {
@@ -848,9 +911,15 @@ impl Daemon {
         }
         self.last_skin_check = Some(std::time::Instant::now());
 
-        let args = skin::Args {
-            layout: layout.to_string(),
-            skin: settings.name.clone(),
+        let args = match settings.channel() {
+            Some(channel) => match self.resolve_channel(root, channel).await {
+                Some(args) => args,
+                None => return false,
+            },
+            None => skin::Args {
+                layout: direct.unwrap_or_default().to_string(),
+                skin: settings.name.clone(),
+            },
         };
         let bytes = match skin::fetch(&self.config, &args).await {
             Ok(bytes) => bytes,

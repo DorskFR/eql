@@ -169,3 +169,31 @@ mod tests {
         );
     }
 }
+
+/// Content scale, which the window rects cannot express: the template bakes
+/// 225 `<Font>` tags and a 64px spell gem, and a phone and a 4K monitor want
+/// different ones at the same pixel count. Empty means leave the template be.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Style {
+    pub font_shift: i32,
+    pub gem: Option<i32>,
+}
+
+impl Style {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// EQ only ships fonts 1..=5; a shift that would leave that range clamps
+    /// rather than producing a tag the client silently ignores.
+    pub fn shift_font(&self, font: i32) -> i32 {
+        (font + self.font_shift).clamp(1, 5)
+    }
+
+    /// The template draws a 40px icon inside a 64px gem; a resized gem keeps
+    /// that ratio so the art stays centred.
+    pub fn icon_for(&self, gem: i32) -> i32 {
+        (i64::from(gem) * 40 / 64) as i32
+    }
+}

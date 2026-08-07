@@ -17,7 +17,7 @@ use axum::{
 use eql_core::{
     api::{HarvestDoc, InventoryUpload, LogBatch, LogEventKind, HARVEST_KINDS},
     inventory::InventoryEntry,
-    layout::Layout,
+    layout::{Layout, Style},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{types::Json as SqlJson, PgPool, Row};
@@ -1104,6 +1104,8 @@ struct LayoutView {
     screen_w: i32,
     screen_h: i32,
     layout: Layout,
+    #[serde(skip_serializing_if = "Style::is_default")]
+    style: Style,
     problems: Vec<String>,
     #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
@@ -1114,10 +1116,13 @@ struct LayoutBody {
     screen_w: i32,
     screen_h: i32,
     layout: Layout,
+    #[serde(default)]
+    style: Style,
 }
 
 fn layout_from_row(row: &sqlx::postgres::PgRow) -> Result<LayoutView, sqlx::Error> {
     let layout: SqlJson<Layout> = row.try_get("layout")?;
+    let style: SqlJson<Style> = row.try_get("style")?;
     let screen_w: i32 = row.try_get("screen_w")?;
     let screen_h: i32 = row.try_get("screen_h")?;
     Ok(LayoutView {
@@ -1126,13 +1131,14 @@ fn layout_from_row(row: &sqlx::postgres::PgRow) -> Result<LayoutView, sqlx::Erro
         screen_h,
         problems: layout.0.validate(screen_w, screen_h),
         layout: layout.0,
+        style: style.0,
         updated_at: row.try_get("updated_at")?,
     })
 }
 
 async fn list_layouts(State(state): State<AppState>) -> Result<Json<Vec<LayoutSummary>>, AppError> {
     let rows = sqlx::query(
-        "select name, screen_w, screen_h, layout, updated_at from layouts order by name asc",
+        "select name, screen_w, screen_h, layout, style, updated_at from layouts order by name asc",
     )
     .fetch_all(&state.pool)
     .await?;
@@ -1158,7 +1164,7 @@ async fn layout_windows() -> Json<Vec<&'static str>> {
 
 async fn fetch_layout(pool: &PgPool, name: &str) -> Result<LayoutView, AppError> {
     let row = sqlx::query(
-        "select name, screen_w, screen_h, layout, updated_at from layouts where name = $1",
+        "select name, screen_w, screen_h, layout, style, updated_at from layouts where name = $1",
     )
     .bind(name)
     .fetch_optional(pool)
@@ -1189,15 +1195,17 @@ async fn store_layout(
         return Err(AppError::BadScreen(body.screen_w, body.screen_h));
     }
     let row = sqlx::query(
-        "insert into layouts (name, screen_w, screen_h, layout) values ($1, $2, $3, $4) \
+        "insert into layouts (name, screen_w, screen_h, layout, style) values ($1, $2, $3, $4, $5) \
          on conflict (name) do update set screen_w = excluded.screen_w, \
-             screen_h = excluded.screen_h, layout = excluded.layout, updated_at = now() \
-         returning name, screen_w, screen_h, layout, updated_at",
+             screen_h = excluded.screen_h, layout = excluded.layout, style = excluded.style, \
+             updated_at = now() \
+         returning name, screen_w, screen_h, layout, style, updated_at",
     )
     .bind(name)
     .bind(body.screen_w)
     .bind(body.screen_h)
     .bind(SqlJson(&body.layout))
+    .bind(SqlJson(&body.style))
     .fetch_one(pool)
     .await?;
     Ok((StatusCode::OK, Json(layout_from_row(&row)?)))
@@ -1222,6 +1230,7 @@ async fn clone_default(
             screen_w: skin::TEMPLATE_WIDTH,
             screen_h: skin::TEMPLATE_HEIGHT,
             layout: skin::default_layout(),
+            style: Style::default(),
         },
     )
     .await
@@ -1255,7 +1264,13 @@ async fn layout_bundle(
     let view = fetch_layout(&state.pool, &name).await?;
     let requested = query.skin.filter(|s| !s.is_empty()).unwrap_or(view.name);
     let skin_name = skin::sanitize_skin_name(&requested);
-    let files = skin::generate_bundle(&view.layout, &requested, view.screen_w, view.screen_h)?;
+    let files = skin::generate_bundle(
+        &view.layout,
+        &requested,
+        view.screen_w,
+        view.screen_h,
+        &view.style,
+    )?;
     let zipped = skin::zip_bundle(&files)?;
 
     Ok((

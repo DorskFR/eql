@@ -82,10 +82,19 @@ pub struct SkinConfig {
     pub check_secs: u64,
     #[serde(default)]
     pub export: bool,
+    pub channel: Option<String>,
     pub screen: Option<(i32, i32)>,
 }
 
 impl SkinConfig {
+    pub fn channel(&self) -> Option<&str> {
+        self.enabled
+            .then_some(self.channel.as_deref())
+            .flatten()
+            .map(str::trim)
+            .filter(|channel| !channel.is_empty())
+    }
+
     pub fn wanted(&self) -> Option<&str> {
         self.enabled.then_some(self.layout.as_deref()).flatten()
     }

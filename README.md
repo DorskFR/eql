@@ -126,13 +126,46 @@ export = true               # also send the in-game arrangement back
 # screen = [1280, 720]      # only if eqclient.ini cannot be trusted
 ```
 
-`layout` is the channel: it is both the layout installed into the game and the
-one whose window sizes the export is measured against. Changing it in the
-config switches channels on the next tick, without a restart.
+### Channels
+
+A channel is one UI across every machine, with a variant per resolution:
+
+```toml
+[skin]
+enabled = true
+channel = "dorskui"         # instead of `layout`
+export  = true
+```
+
+Layouts named `dorskui@3840x2160`, `dorskui@1440x1050`, `dorskui@1280x720` are
+variants of the `dorskui` channel. eqld reads the render size from
+`eqclient.ini`, picks the variant, and installs it as `uifiles/dorskui/` — the
+skin folder is named for the channel, not the variant, so `/loadskin dorskui`
+is the same command on the PC, the MacBook and the phone.
+
+No exact match falls back to the nearest variant by **aspect first, then area**.
+Positions are percentages and reflow correctly within a shape; a variant of a
+different shape does not, however close its pixel count.
+
+A variant owns its `style` as well as its rects, because window geometry cannot
+express content scale:
+
+| Key | What |
+|-----|------|
+| `font_shift` | Added to every `<Font>` tag, clamped to the 1..=5 the client ships |
+| `gem` | Spell gem cell in px; the 40/64 icon ratio is kept |
+
+That matters more than resolution: 1280x720 on a 6.8" phone wants the *large*
+fonts, the same 1280x720 on a laptop wants small ones. It is DPI, not pixels,
+so the variant states it rather than deriving it.
+
+`layout` still works for a single fixed layout; `channel` supersedes it.
 
 With `export = true` each tick reads `UI_<Character>_<server>_LO1.ini`, hashes
 the geometry of the tracked windows only — chat routing and bag positions churn
-constantly and must not count — and uploads on change as
+constantly and must not count — and uploads on change. In
+channel mode it writes back to `<channel>@<W>x<H>`, so a machine edits its own
+variant and cannot disturb another's; otherwise it names the upload
 `<character>-<server>-<W>x<H>-<YYYYmmdd-HHMMSS>`. No change, no upload. The
 render size comes from `eqclient.ini` (`WindowedWidth`/`WindowedHeight`, else
 `Width`/`Height`); `screen` overrides it.
