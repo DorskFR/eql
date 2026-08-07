@@ -209,11 +209,21 @@ export interface LayoutSummary {
 	updated_at: string;
 }
 
+/** `hidden` and `bare` name ini sections, which may be windows the layout does
+ *  not position — that is how toolbars are switched off. */
+export interface LayoutStyle {
+	font_shift?: number;
+	gem?: number | null;
+	hidden?: string[];
+	bare?: string[];
+}
+
 export interface LayoutView {
 	name: string;
 	screen_w: number;
 	screen_h: number;
 	layout: Record<string, Rect>;
+	style?: LayoutStyle;
 	problems: string[];
 	updated_at: string;
 }
@@ -222,6 +232,7 @@ export interface LayoutBody {
 	screen_w: number;
 	screen_h: number;
 	layout: Record<string, Rect>;
+	style?: LayoutStyle;
 }
 
 export class ApiError extends Error {
@@ -318,8 +329,43 @@ export const endpoints = {
 			token
 		),
 	deleteLayout: (token: string, name: string) =>
-		authed<null>('DELETE', `/api/v1/layouts/${encodeURIComponent(name)}`, token)
+		authed<null>('DELETE', `/api/v1/layouts/${encodeURIComponent(name)}`, token),
+	devices: (token: string) => authed<DeviceSummary[]>('GET', '/api/v1/devices', token),
+	deviceSessions: (token: string, device: string) =>
+		authed<SessionSummary[]>(
+			'GET',
+			`/api/v1/devices/${encodeURIComponent(device)}/sessions`,
+			token
+		),
+	deviceSession: (token: string, device: string, session: string) =>
+		authed<SessionLog>(
+			'GET',
+			`/api/v1/devices/${encodeURIComponent(device)}/sessions/${encodeURIComponent(session)}`,
+			token
+		)
 };
+
+export interface DeviceSummary {
+	device: string;
+	sessions: number;
+	lines: number;
+	last_at: string;
+}
+
+export interface SessionSummary {
+	session: string;
+	lines: number;
+	dropped: number;
+	started_at: string;
+	last_at: string;
+}
+
+export interface SessionLog {
+	device: string;
+	session: string;
+	dropped: number;
+	lines: string[];
+}
 
 export const bundleUrl = (name: string, skin: string) => {
 	const query = skin ? `?skin=${encodeURIComponent(skin)}` : '';

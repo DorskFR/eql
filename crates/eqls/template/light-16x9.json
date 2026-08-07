@@ -1,0 +1,47 @@
+{
+  "screen_w": 1600,
+  "screen_h": 900,
+  "layout": {
+    "BuffWindow": [0, 0, 940, 72],
+    "ShortDurationBuffWindow": [950, 0, 650, 72],
+    "PlayerWindow": [0, 80, 280, 110],
+    "TargetWindow": [1320, 80, 280, 110],
+    "GroupWindow": [1320, 200, 280, 200],
+    "PetInfoWindow": [1320, 410, 280, 120],
+    "ExtendedTargetWnd": [1320, 540, 280, 120],
+    "Chat 1": [0, 470, 980, 140],
+    "HotButtonWnd2": [1010, 560, 590, 50],
+    "CastingWindow": [600, 620, 400, 50],
+    "MainChat": [0, 690, 980, 210],
+    "CastSpellWnd": [990, 690, 610, 100],
+    "HotButtonWnd": [990, 800, 610, 100]
+  },
+  "style": {
+    "font_shift": 0,
+    "bare": [
+      "BuffWindow",
+      "ShortDurationBuffWindow",
+      "CastingWindow",
+      "MainChat",
+      "Chat 1"
+    ],
+    "hidden": [
+      "Chat 1",
+      "ExtendedTargetWnd",
+      "EQMainWnd",
+      "StanceWnd",
+      "MapViewWnd",
+      "TargetOfTargetWindow",
+      "HotButtonWnd2",
+      "HotButtonWnd3",
+      "HotButtonWnd4",
+      "HotButtonWnd5",
+      "HotButtonWnd6",
+      "HotButtonWnd7",
+      "HotButtonWnd8",
+      "HotButtonWnd9",
+      "HotButtonWnd10",
+      "HotButtonWnd11"
+    ]
+  }
+}

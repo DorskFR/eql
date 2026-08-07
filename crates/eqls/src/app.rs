@@ -63,6 +63,17 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             put(put_layout).delete(delete_layout),
         )
         .route("/api/v1/layouts/{name}/clone-default", post(clone_default))
+        .route("/api/v1/layouts/{name}/clone/{preset}", post(clone_preset))
+        .route("/api/v1/device-logs", post(ingest_device_logs))
+        .route("/api/v1/devices", get(list_devices))
+        .route(
+            "/api/v1/devices/{device}/sessions",
+            get(list_device_sessions),
+        )
+        .route(
+            "/api/v1/devices/{device}/sessions/{session}",
+            get(get_device_session),
+        )
         .layer(from_fn_with_state(state.clone(), require_machine_token));
 
     let api = Router::new()
@@ -95,6 +106,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route("/api/v1/layouts/{name}", get(get_layout))
         .route("/api/v1/layouts/{name}/bundle", get(layout_bundle))
         .route("/api/v1/layout-windows", get(layout_windows))
+        .route("/api/v1/layout-presets", get(layout_presets))
         .merge(ingest);
 
     let index = web_dist.join("index.html");
@@ -1129,7 +1141,7 @@ fn layout_from_row(row: &sqlx::postgres::PgRow) -> Result<LayoutView, sqlx::Erro
         name: row.try_get("name")?,
         screen_w,
         screen_h,
-        problems: layout.0.validate(screen_w, screen_h),
+        problems: layout.0.validate(screen_w, screen_h, &style.0.hidden),
         layout: layout.0,
         style: style.0,
         updated_at: row.try_get("updated_at")?,
@@ -1234,6 +1246,198 @@ async fn clone_default(
         },
     )
     .await
+}
+
+#[derive(Deserialize)]
+struct DeviceLogUpload {
+    device: String,
+    session: String,
+    seq: i64,
+    #[serde(default)]
+    dropped: i64,
+    at: Option<i64>,
+    lines: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DeviceLogAccepted {
+    stored: usize,
+}
+
+async fn ingest_device_logs(
+    State(state): State<AppState>,
+    Json(upload): Json<DeviceLogUpload>,
+) -> Result<(StatusCode, Json<DeviceLogAccepted>), AppError> {
+    if upload.device.trim().is_empty() || upload.session.trim().is_empty() {
+        return Err(AppError::EmptyDevice);
+    }
+    if upload.lines.is_empty() {
+        return Err(AppError::EmptyLogLines);
+    }
+    let at = match upload.at {
+        Some(unix) => {
+            OffsetDateTime::from_unix_timestamp(unix).map_err(|_| AppError::BadCapturedAt(unix))?
+        }
+        None => OffsetDateTime::now_utc(),
+    };
+
+    let stored = sqlx::query(
+        "insert into device_logs (device, session, seq, at, dropped, lines) \
+         values ($1, $2, $3, $4, $5, $6) on conflict (device, session, seq) do nothing",
+    )
+    .bind(upload.device.trim())
+    .bind(upload.session.trim())
+    .bind(upload.seq)
+    .bind(at)
+    .bind(upload.dropped)
+    .bind(SqlJson(&upload.lines))
+    .execute(&state.pool)
+    .await?
+    .rows_affected() as usize;
+
+    prune_device_logs(&state.pool).await?;
+    Ok((StatusCode::ACCEPTED, Json(DeviceLogAccepted { stored })))
+}
+
+/// Diagnostics are worth keeping only as long as a bug hunt lasts, and nothing
+/// else in the schema expires on its own.
+const DEVICE_LOG_DAYS: i64 = 14;
+
+async fn prune_device_logs(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("delete from device_logs where at < now() - make_interval(days => $1::int)")
+        .bind(DEVICE_LOG_DAYS as i32)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct DeviceSummary {
+    device: String,
+    sessions: i64,
+    lines: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    last_at: OffsetDateTime,
+}
+
+async fn list_devices(State(state): State<AppState>) -> Result<Json<Vec<DeviceSummary>>, AppError> {
+    let rows = sqlx::query(
+        "select device, count(distinct session) as sessions, \
+                coalesce(sum(jsonb_array_length(lines)), 0) as lines, max(at) as last_at \
+         from device_logs group by device order by max(at) desc",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                Ok(DeviceSummary {
+                    device: row.try_get("device")?,
+                    sessions: row.try_get("sessions")?,
+                    lines: row.try_get("lines")?,
+                    last_at: row.try_get("last_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+    ))
+}
+
+#[derive(Serialize)]
+struct SessionSummary {
+    session: String,
+    lines: i64,
+    dropped: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    started_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    last_at: OffsetDateTime,
+}
+
+async fn list_device_sessions(
+    State(state): State<AppState>,
+    Path(device): Path<String>,
+) -> Result<Json<Vec<SessionSummary>>, AppError> {
+    let rows = sqlx::query(
+        "select session, coalesce(sum(jsonb_array_length(lines)), 0) as lines, \
+                coalesce(sum(dropped), 0)::bigint as dropped, min(at) as started_at, max(at) as last_at \
+         from device_logs where device = $1 group by session order by max(at) desc limit 200",
+    )
+    .bind(&device)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                Ok(SessionSummary {
+                    session: row.try_get("session")?,
+                    lines: row.try_get("lines")?,
+                    dropped: row.try_get("dropped")?,
+                    started_at: row.try_get("started_at")?,
+                    last_at: row.try_get("last_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+    ))
+}
+
+#[derive(Serialize)]
+struct SessionLog {
+    device: String,
+    session: String,
+    dropped: i64,
+    lines: Vec<String>,
+}
+
+async fn get_device_session(
+    State(state): State<AppState>,
+    Path((device, session)): Path<(String, String)>,
+) -> Result<Json<SessionLog>, AppError> {
+    let rows = sqlx::query(
+        "select dropped, lines from device_logs \
+         where device = $1 and session = $2 order by seq asc",
+    )
+    .bind(&device)
+    .bind(&session)
+    .fetch_all(&state.pool)
+    .await?;
+    if rows.is_empty() {
+        return Err(AppError::NotFound);
+    }
+    let mut lines = Vec::new();
+    let mut dropped = 0i64;
+    for row in &rows {
+        dropped += row.try_get::<i64, _>("dropped")?;
+        let chunk: SqlJson<Vec<String>> = row.try_get("lines")?;
+        lines.extend(chunk.0);
+    }
+    Ok(Json(SessionLog {
+        device,
+        session,
+        dropped,
+        lines,
+    }))
+}
+
+async fn clone_preset(
+    State(state): State<AppState>,
+    Path((name, preset)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<LayoutView>), AppError> {
+    let preset = skin::preset(&preset).ok_or(AppError::NotFound)?;
+    store_layout(
+        &state.pool,
+        &name,
+        LayoutBody {
+            screen_w: preset.screen_w,
+            screen_h: preset.screen_h,
+            layout: preset.layout,
+            style: preset.style,
+        },
+    )
+    .await
+}
+
+async fn layout_presets() -> Json<Vec<&'static str>> {
+    Json(skin::preset_names().collect())
 }
 
 async fn delete_layout(
@@ -1395,6 +1599,10 @@ enum AppError {
     BadCursor(String),
     #[error("captured_at {0} is not a valid unix timestamp")]
     BadCapturedAt(i64),
+    #[error("device and session must not be empty")]
+    EmptyDevice,
+    #[error("a device log upload must contain at least one line")]
+    EmptyLogLines,
     #[error("layout name must not be empty")]
     EmptyLayoutName,
     #[error("screen size must be positive, got {0}x{1}")]
@@ -1422,6 +1630,8 @@ impl IntoResponse for AppError {
             | AppError::UnknownHarvestKind(_)
             | AppError::BadCapturedAt(_)
             | AppError::EmptyLayoutName
+            | AppError::EmptyDevice
+            | AppError::EmptyLogLines
             | AppError::BadScreen(_, _)
             | AppError::Skin(_)
             | AppError::Icon(_)
@@ -1614,6 +1824,131 @@ mod tests {
             PathBuf::from("web/build"),
         );
         Some((app, pool))
+    }
+
+    #[tokio::test]
+    async fn device_logs_land_dedupe_and_read_back_in_order() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+        sqlx::query("truncate device_logs restart identity")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let post = |body: String| {
+            layout_write("POST", "/api/v1/device-logs", Some("s3cret"), &body.clone())
+        };
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let first = format!(
+            r#"{{"device":"phone","session":"s1","seq":0,"dropped":0,"at":{now},
+            "lines":["{now} INFO  eqld eqld starting","{now} WARN  eqld skin held"]}}"#
+        );
+        let (status, accepted) = json_of(&app, post(first.clone())).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(accepted["stored"], 1);
+
+        let (status, again) = json_of(&app, post(first)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(again["stored"], 0, "a retried batch is not stored twice");
+
+        let second = format!(
+            r#"{{"device":"phone","session":"s1","seq":1,"dropped":3,"at":{},
+            "lines":["{} INFO  eqld exported"]}}"#,
+            now + 100,
+            now + 100
+        );
+        assert_eq!(json_of(&app, post(second)).await.0, StatusCode::ACCEPTED);
+
+        let other = format!(
+            r#"{{"device":"desktop","session":"s9","seq":0,"at":{},
+            "lines":["{} INFO  eqld hello"]}}"#,
+            now + 200,
+            now + 200
+        );
+        assert_eq!(json_of(&app, post(other)).await.0, StatusCode::ACCEPTED);
+
+        let read = |uri: &str| {
+            Request::builder()
+                .uri(uri.to_string())
+                .header("authorization", "Bearer s3cret")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, devices) = json_of(&app, read("/api/v1/devices")).await;
+        assert_eq!(status, StatusCode::OK);
+        let devices = devices.as_array().unwrap().clone();
+        assert_eq!(devices.len(), 2);
+        let phone = devices
+            .iter()
+            .find(|row| row["device"] == "phone")
+            .expect("the phone is listed");
+        assert_eq!(phone["sessions"], 1);
+        assert_eq!(phone["lines"], 3);
+
+        let (status, sessions) = json_of(&app, read("/api/v1/devices/phone/sessions")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sessions[0]["session"], "s1");
+        assert_eq!(sessions[0]["lines"], 3);
+        assert_eq!(sessions[0]["dropped"], 3);
+
+        let (status, log) = json_of(&app, read("/api/v1/devices/phone/sessions/s1")).await;
+        assert_eq!(status, StatusCode::OK);
+        let lines = log["lines"].as_array().unwrap().clone();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].as_str().unwrap().contains("eqld starting"));
+        assert_eq!(
+            lines[2].as_str().unwrap(),
+            format!("{} INFO  eqld exported", now + 100),
+            "batches concatenate in sequence order"
+        );
+
+        assert_eq!(
+            status_of_request(&app, read("/api/v1/devices/phone/sessions/nope")).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn device_logs_need_the_machine_token_and_refuse_empty_uploads() {
+        for request in [
+            layout_write("POST", "/api/v1/device-logs", None, "{}"),
+            Request::builder()
+                .uri("/api/v1/devices")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            assert_eq!(status_of(request).await, StatusCode::UNAUTHORIZED);
+        }
+
+        let empty = r#"{"device":"phone","session":"s1","seq":0,"lines":[]}"#;
+        assert_eq!(
+            status_of(layout_write(
+                "POST",
+                "/api/v1/device-logs",
+                Some("s3cret"),
+                empty
+            ))
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let nameless = r#"{"device":" ","session":"s1","seq":0,"lines":["x"]}"#;
+        assert_eq!(
+            status_of(layout_write(
+                "POST",
+                "/api/v1/device-logs",
+                Some("s3cret"),
+                nameless
+            ))
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    async fn status_of_request(app: &Router, request: Request<Body>) -> StatusCode {
+        app.clone().oneshot(request).await.unwrap().status()
     }
 
     async fn json_of(app: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
@@ -2138,6 +2473,25 @@ mod tests {
         let windows = windows.as_array().unwrap().clone();
         assert_eq!(windows.len(), 13);
         assert!(windows.contains(&serde_json::json!("MainChat")));
+
+        let (status, presets) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/layout-presets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        for name in ["default", "light-16x9", "light-16x10"] {
+            assert!(
+                presets
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(name)),
+                "{presets:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2243,6 +2597,54 @@ mod tests {
         let names: Vec<&str> = archive.file_names().collect();
         assert!(names.contains(&"uifiles/my_skin/EQUI_PlayerWindow.xml"));
         assert!(names.contains(&skin::INI_NAME));
+
+        let (status, light) = json_of(
+            &app,
+            layout_write(
+                "POST",
+                "/api/v1/layouts/light%401600x900/clone/light-16x9",
+                Some("s3cret"),
+                "",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(light["screen_w"], 1600);
+        assert_eq!(light["screen_h"], 900);
+        assert_eq!(light["problems"].as_array().unwrap().len(), 0);
+        assert_eq!(light["layout"]["BuffWindow"][1], 0, "buffs sit at the top");
+        assert!(light["style"]["hidden"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("EQMainWnd")));
+        assert!(light["style"]["bare"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("MainChat")));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/layouts/light%401600x900/bundle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "the light bundle builds");
+
+        let missing_preset = app
+            .clone()
+            .oneshot(layout_write(
+                "POST",
+                "/api/v1/layouts/nope/clone/no-such-preset",
+                Some("s3cret"),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing_preset.status(), StatusCode::NOT_FOUND);
 
         let unknown = r#"{"screen_w":3840,"screen_h":2160,"layout":{"BankWindow":[0,0,10,10]}}"#;
         let (status, error) = json_of(

@@ -19,13 +19,40 @@ pub struct Config {
     pub log: LogConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LogConfig {
     pub colour: Option<bool>,
     pub color: Option<bool>,
+    #[serde(default = "default_log_upload")]
+    pub upload: bool,
+    pub device: Option<String>,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            colour: None,
+            color: None,
+            upload: default_log_upload(),
+            device: None,
+        }
+    }
+}
+
+fn default_log_upload() -> bool {
+    true
 }
 
 impl LogConfig {
+    pub fn device(&self) -> String {
+        self.device
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(crate::diag::host_name)
+    }
+
     /// Unset follows NO_COLOR, which a console that cannot render the escape
     /// codes has no way to tell us about.
     pub fn colour(&self) -> bool {
@@ -281,6 +308,10 @@ impl Config {
         self.api_url("fights")
     }
 
+    pub fn device_logs_endpoint(&self) -> String {
+        self.api_url("device-logs")
+    }
+
     /// Ours, beside the state file: the log reader's own directory is scanned
     /// and shipped wholesale, and fights do not travel that way.
     pub fn fights_dir(&self) -> PathBuf {
@@ -348,7 +379,12 @@ impl Config {
             tools: next.tools,
             socials: next.socials,
             skin: next.skin,
-            log: self.log.clone(),
+            log: LogConfig {
+                colour: self.log.colour,
+                color: self.log.color,
+                upload: next.log.upload,
+                device: next.log.device,
+            },
         }
     }
 }
@@ -462,6 +498,51 @@ mod tests {
             base.hot_swap(quiet).log.colour(),
             "the running value is kept until a restart"
         );
+    }
+
+    #[test]
+    fn log_uploading_is_switched_on_and_off_while_the_daemon_runs() {
+        let base: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            "#,
+        )
+        .unwrap();
+        assert!(base.log.upload, "uploading is on unless it is turned off");
+        assert_eq!(base.log.device(), crate::diag::host_name());
+
+        let mut next = base.clone();
+        next.log.upload = false;
+        next.log.device = Some("phone".into());
+        assert!(
+            base.frozen_changes(&next).is_empty(),
+            "neither needs a restart"
+        );
+
+        let merged = base.hot_swap(next);
+        assert!(!merged.log.upload);
+        assert_eq!(merged.log.device(), "phone");
+    }
+
+    #[test]
+    fn a_blank_device_falls_back_to_the_hostname() {
+        let config: Config = toml::from_str(
+            r#"
+            [game]
+            root = "/games/eq"
+            [api]
+            url = "u"
+            token = "t"
+            [log]
+            device = "  "
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.log.device(), crate::diag::host_name());
     }
 
     #[test]

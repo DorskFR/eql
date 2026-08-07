@@ -15,9 +15,12 @@ export function within(rect: Rect, width: number, height: number): boolean {
 export function validate(
 	layout: Record<string, Rect>,
 	width: number,
-	height: number
+	height: number,
+	hidden: string[] = []
 ): string[] {
-	const entries = Object.entries(layout).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+	const entries = Object.entries(layout)
+		.filter(([name]) => !hidden.includes(name))
+		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 	const problems: string[] = [];
 	for (const [name, rect] of entries) {
 		if (!within(rect, width, height)) problems.push(`${name} offscreen`);
