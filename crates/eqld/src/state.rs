@@ -31,6 +31,8 @@ pub struct SkinState {
     pub layout: String,
     pub name: Option<String>,
     pub digest: String,
+    #[serde(default)]
+    pub ini_digest: Option<String>,
     pub installed: String,
     pub installed_at: Option<i64>,
 }

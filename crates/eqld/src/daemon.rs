@@ -892,17 +892,10 @@ impl Daemon {
             );
             return false;
         }
-        match game {
-            Game::Closed => {}
-            Game::Running => {
-                self.note_skin("the game is running; the skin will be installed once it exits");
-                return false;
-            }
-            Game::Undetectable => {
-                self.note_skin(UNDETECTABLE_NOTE);
-                return false;
-            }
-        }
+        let closed = match game {
+            Game::Closed => true,
+            Game::Running | Game::Undetectable => false,
+        };
         if self
             .last_skin_check
             .is_some_and(|at| at.elapsed() < settings.check_interval())
@@ -929,18 +922,35 @@ impl Daemon {
             }
         };
         let digest = bytes_hash(&bytes);
-        if !skin::changed(self.state.skin.as_ref(), &args, &digest) {
+        let seen = self.state.skin.as_ref();
+        let needs_xml = skin::changed(seen, &args, &digest);
+        let needs_ini = seen.is_none_or(|seen| seen.ini_digest.as_deref() != Some(digest.as_str()));
+        if !needs_xml && !needs_ini {
             self.skin_note.clear();
             return false;
         }
-        match skin::install(root, &bytes) {
+        if !needs_xml && !closed {
+            self.note_skin(
+                "the window sizes are in place; their positions land once the client exits",
+            );
+            return false;
+        }
+        match skin::install_parts(root, &bytes, closed) {
             Ok(installed) => {
                 report.skins += 1;
-                self.skin_note.clear();
+                match closed {
+                    true => {
+                        self.skin_note.clear();
+                    }
+                    false => self.note_skin(
+                        "installed the window sizes; /loadskin shows them, and their positions land once the client exits",
+                    ),
+                }
                 self.seed_exports(root);
                 self.state.skin = Some(SkinState {
                     layout: args.layout.clone(),
                     name: args.skin.clone(),
+                    ini_digest: closed.then(|| digest.clone()),
                     digest,
                     installed: installed.clone(),
                     installed_at: unix_secs(SystemTime::now()),

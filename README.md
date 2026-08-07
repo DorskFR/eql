@@ -170,6 +170,13 @@ variant and cannot disturb another's; otherwise it names the upload
 render size comes from `eqclient.ini` (`WindowedWidth`/`WindowedHeight`, else
 `Width`/`Height`); `screen` overrides it.
 
+`uifiles/<skin>/` is ours and is only read at `/loadskin`, so window **sizes**
+are written whatever the client is doing. The `UI_*_LO1.ini` carries the
+**positions**, belongs to the client, and is rewritten by it on exit — so that
+one still waits for the client to be gone, and eqld remembers it is owed. With
+the client up the skin folder is refreshed in place rather than renamed aside,
+because renaming a directory it holds open fails on Windows.
+
 Export only reads, so it runs whether or not the client is up. The client
 rewrites that ini as it exits, which is the edge the hash is waiting for — so a
 session's rearranging lands one tick after you quit. A skin install is adopted

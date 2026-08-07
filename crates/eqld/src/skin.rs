@@ -136,6 +136,15 @@ pub async fn run(config: &Config, args: &[String]) -> Result<(), InstallError> {
 /// Returns the skin name found in the bundle, having replaced
 /// `<root>/uifiles/<skin>` and any pre-existing ini after backing them up.
 pub fn install(root: &Path, bundle: &[u8]) -> Result<String, InstallError> {
+    install_parts(root, bundle, true)
+}
+
+/// `uifiles/<skin>/` is ours and only read at `/loadskin`, so it can be
+/// rewritten under a running client; the `UI_*_LO1.ini` is the client's and is
+/// rewritten by it on exit, so writing that one behind its back loses the edit.
+/// With the client up the directory is refreshed in place rather than renamed
+/// aside, because renaming a directory it holds open fails on Windows.
+pub fn install_parts(root: &Path, bundle: &[u8], write_ini: bool) -> Result<String, InstallError> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bundle))?;
     let stamp = unix_stamp();
 
@@ -163,7 +172,7 @@ pub fn install(root: &Path, bundle: &[u8]) -> Result<String, InstallError> {
         .to_string();
 
     let skin_dir = root.join("uifiles").join(&skin);
-    if skin_dir.exists() {
+    if write_ini && skin_dir.exists() {
         let backup = sibling(&skin_dir, &stamp);
         std::fs::rename(&skin_dir, &backup)
             .map_err(|err| InstallError::Io(skin_dir.clone(), err))?;
@@ -171,8 +180,12 @@ pub fn install(root: &Path, bundle: &[u8]) -> Result<String, InstallError> {
     }
 
     for (name, contents) in &entries {
+        let is_skin = skin_of(name).is_some();
+        if !is_skin && !write_ini {
+            continue;
+        }
         let target = root.join(name);
-        if skin_of(name).is_none() && target.exists() {
+        if !is_skin && target.exists() {
             let backup = sibling(&target, &stamp);
             std::fs::copy(&target, &backup).map_err(|err| InstallError::Io(target.clone(), err))?;
             tracing::info!(from = %target.display(), to = %backup.display(), "backed up ini");
@@ -365,6 +378,7 @@ mod tests {
     #[test]
     fn a_bundle_is_only_reinstalled_when_something_about_it_changed() {
         let installed = crate::state::SkinState {
+            ini_digest: None,
             layout: "dorskui".into(),
             name: Some("v4".into()),
             digest: "abc".into(),
