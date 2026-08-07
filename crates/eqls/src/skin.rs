@@ -1,4 +1,4 @@
-use eql_core::layout::{Layout, Rect};
+use eql_core::layout::{Layout, Rect, Style};
 use std::io::Write;
 
 pub const INI_NAME: &str = "UI_Dorsk_erudin_LO1.ini";
@@ -92,6 +92,7 @@ pub fn generate_bundle(
     skin_name: &str,
     screen_w: i32,
     screen_h: i32,
+    style: &Style,
 ) -> Result<Vec<(String, Vec<u8>)>, SkinError> {
     if screen_w <= 0 || screen_h <= 0 {
         return Err(SkinError::BadScreen(screen_w, screen_h));
@@ -129,7 +130,7 @@ pub fn generate_bundle(
             .find(|(candidate, _)| candidate == name)
             .expect("by_file mirrors XML_FILES")
             .1;
-        let mut text = (*source).to_string();
+        let mut text = apply_style(source, style);
         for (item, rect) in edits {
             text = patch_screen_size(&text, item, rect.w, rect.h).ok_or_else(|| {
                 SkinError::MissingScreenSize {
@@ -159,6 +160,60 @@ pub fn zip_bundle(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, SkinError> {
             .map_err(zip::result::ZipError::Io)?;
     }
     Ok(writer.finish()?.into_inner())
+}
+
+/// Font tags and the spell gem are the only content the template scales; the
+/// gem's `<Ui2DAnimation>` frames are texture source rects and are left alone,
+/// or the art would crop instead of resize.
+fn apply_style(source: &str, style: &Style) -> String {
+    let mut text = source.to_string();
+    if style.font_shift != 0 {
+        let order: Vec<i32> = match style.font_shift > 0 {
+            true => (1..=5).rev().collect(),
+            false => (1..=5).collect(),
+        };
+        for font in order {
+            text = text.replace(
+                &format!("<Font>{font}</Font>"),
+                &format!("<Font>{}</Font>", style.shift_font(font)),
+            );
+        }
+    }
+    if let Some(gem) = style.gem.filter(|gem| *gem > 0) {
+        let icon = style.icon_for(gem);
+        text = replace_in_blocks(&text, "<SpellGem item=", "</SpellGem>", |block| {
+            let sized = block.replacen(
+                "<Size>\n\t\t\t<CX>64</CX>\n\t\t\t<CY>64</CY>\n\t\t</Size>",
+                &format!("<Size>\n\t\t\t<CX>{gem}</CX>\n\t\t\t<CY>{gem}</CY>\n\t\t</Size>"),
+                1,
+            );
+            sized
+                .replace(
+                    "<SpellIconSizeX>40</SpellIconSizeX>",
+                    &format!("<SpellIconSizeX>{icon}</SpellIconSizeX>"),
+                )
+                .replace(
+                    "<SpellIconSizeY>40</SpellIconSizeY>",
+                    &format!("<SpellIconSizeY>{icon}</SpellIconSizeY>"),
+                )
+        });
+    }
+    text
+}
+
+fn replace_in_blocks(text: &str, open: &str, close: &str, edit: impl Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(open) {
+        let Some(end) = rest[start..].find(close).map(|at| start + at + close.len()) else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(&edit(&rest[start..end]));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Replaces the `<Size>` of `<Screen item="…">`. `<Screen>` blocks are never
@@ -262,7 +317,133 @@ mod tests {
     }
 
     fn generate(layout: &Layout) -> Vec<(String, Vec<u8>)> {
-        generate_bundle(layout, "dorskui", TEMPLATE_WIDTH, TEMPLATE_HEIGHT).unwrap()
+        generate_bundle(
+            layout,
+            "dorskui",
+            TEMPLATE_WIDTH,
+            TEMPLATE_HEIGHT,
+            &Style::default(),
+        )
+        .unwrap()
+    }
+
+    fn phone_layout() -> Layout {
+        Layout(BTreeMap::from([
+            ("BuffWindow".to_string(), (0, 0, 780, 150)),
+            ("ShortDurationBuffWindow".to_string(), (790, 0, 490, 150)),
+            ("PlayerWindow".to_string(), (0, 160, 300, 130)),
+            ("PetInfoWindow".to_string(), (0, 300, 300, 110)),
+            ("TargetWindow".to_string(), (980, 160, 300, 130)),
+            ("ExtendedTargetWnd".to_string(), (980, 300, 300, 110)),
+            ("CastSpellWnd".to_string(), (0, 430, 350, 140)),
+            ("CastingWindow".to_string(), (360, 430, 330, 60)),
+            ("GroupWindow".to_string(), (700, 430, 280, 140)),
+            ("Chat 1".to_string(), (990, 430, 290, 140)),
+            ("HotButtonWnd".to_string(), (0, 580, 350, 140)),
+            ("HotButtonWnd2".to_string(), (360, 580, 350, 140)),
+            ("MainChat".to_string(), (720, 580, 560, 140)),
+        ]))
+    }
+
+    fn gems(text: &str) -> Vec<&str> {
+        text.match_indices("<SpellGem item=")
+            .map(|(at, _)| {
+                let end = text[at..].find("</SpellGem>").unwrap() + at;
+                &text[at..end]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_font_shift_moves_every_tag_without_shifting_it_twice() {
+        let source = "<Font>3</Font><Font>4</Font><Font>5</Font>";
+        assert_eq!(
+            apply_style(
+                source,
+                &Style {
+                    font_shift: 1,
+                    gem: None
+                }
+            ),
+            "<Font>4</Font><Font>5</Font><Font>5</Font>"
+        );
+        assert_eq!(
+            apply_style(
+                source,
+                &Style {
+                    font_shift: -2,
+                    gem: None
+                }
+            ),
+            "<Font>1</Font><Font>2</Font><Font>3</Font>"
+        );
+    }
+
+    #[test]
+    fn a_font_shift_cannot_leave_the_range_the_client_ships() {
+        let shifted = apply_style(
+            "<Font>1</Font><Font>5</Font>",
+            &Style {
+                font_shift: 9,
+                gem: None,
+            },
+        );
+        assert_eq!(shifted, "<Font>5</Font><Font>5</Font>");
+        let down = apply_style(
+            "<Font>1</Font><Font>5</Font>",
+            &Style {
+                font_shift: -9,
+                gem: None,
+            },
+        );
+        assert_eq!(down, "<Font>1</Font><Font>1</Font>");
+    }
+
+    #[test]
+    fn resizing_the_gem_scales_its_icon_and_leaves_the_texture_alone() {
+        let source = XML_FILES
+            .iter()
+            .find(|(name, _)| *name == "EQUI_CastSpellWnd.xml")
+            .unwrap()
+            .1;
+        let styled = apply_style(
+            source,
+            &Style {
+                font_shift: 0,
+                gem: Some(48),
+            },
+        );
+        for block in gems(&styled) {
+            assert!(
+                block.contains("<CX>48</CX>"),
+                "gem not resized: {block:.200}"
+            );
+            assert!(
+                block.contains("<SpellIconSizeX>30</SpellIconSizeX>"),
+                "{block:.200}"
+            );
+        }
+        assert!(
+            styled.contains("<Ui2DAnimation item=\"Spell_Gem_Background\">"),
+            "the background animation was dropped"
+        );
+        let texture_frames = styled
+            .matches("<Texture>window_pieces07.tga</Texture>")
+            .count();
+        assert_eq!(
+            texture_frames,
+            source
+                .matches("<Texture>window_pieces07.tga</Texture>")
+                .count(),
+            "texture source rects should be untouched"
+        );
+    }
+
+    #[test]
+    fn the_default_style_changes_nothing() {
+        for (_, source) in XML_FILES {
+            assert_eq!(&apply_style(source, &Style::default()), *source);
+        }
     }
 
     #[test]
@@ -284,6 +465,45 @@ mod tests {
                 assert!(XML_FILES.iter().any(|(name, _)| name == file));
             }
         }
+    }
+
+    #[test]
+    fn a_generated_ini_reads_back_as_the_layout_that_made_it() {
+        for (layout, w, h) in [
+            (default_layout(), TEMPLATE_WIDTH, TEMPLATE_HEIGHT),
+            (phone_layout(), 1280, 720),
+        ] {
+            let files = generate_bundle(&layout, "dorskui", w, h, &Style::default()).unwrap();
+            let ini = bundle_map(&files)[INI_NAME];
+            let sizes = layout
+                .rects()
+                .map(|(name, rect)| (name.to_string(), (rect.w, rect.h)))
+                .collect();
+            assert_eq!(
+                eql_core::layout::from_ui_ini(ini, w, h, &sizes),
+                layout,
+                "{w}x{h} did not survive the round trip"
+            );
+        }
+    }
+
+    /// Anchors in the wild are a mix of left/center/right; the fixture the
+    /// generator ships is uniform, so this pins the ones it does not write.
+    #[test]
+    fn anchors_the_generator_never_writes_do_not_move_a_window() {
+        let sizes = BTreeMap::from([("PlayerWindow".to_string(), (300, 130))]);
+        let read = |xref: &str, yref: &str| {
+            eql_core::layout::from_ui_ini(
+                &format!(
+                    "[PlayerWindow]\r\nXRef={xref}\r\nYRef={yref}\r\nXPos=25.000000%\r\nYPos=50.000000%\r\nWidth=300\r\nHeight=130\r\n"
+                ),
+                1280,
+                720,
+                &sizes,
+            )
+        };
+        assert_eq!(read("left", "top"), read("center", "bottom"));
+        assert_eq!(read("left", "top"), read("right", "center"));
     }
 
     #[test]
@@ -409,7 +629,7 @@ mod tests {
     fn unknown_windows_are_rejected() {
         let mut layout = default_layout();
         layout.0.insert("BankWindow".into(), (0, 0, 10, 10));
-        let error = generate_bundle(&layout, "dorskui", 3840, 2160).unwrap_err();
+        let error = generate_bundle(&layout, "dorskui", 3840, 2160, &Style::default()).unwrap_err();
         assert!(matches!(&error, SkinError::UnknownWindow(name) if name == "BankWindow"));
         assert!(error.to_string().contains("BankWindow"));
     }
@@ -420,14 +640,15 @@ mod tests {
         assert_eq!(sanitize_skin_name("My Skin!"), "my_skin");
         assert_eq!(sanitize_skin_name("DorskUI"), "dorskui");
         assert!(matches!(
-            generate_bundle(&default_layout(), "///", 3840, 2160).unwrap_err(),
+            generate_bundle(&default_layout(), "///", 3840, 2160, &Style::default()).unwrap_err(),
             SkinError::EmptySkinName
         ));
         assert!(matches!(
-            generate_bundle(&default_layout(), "x", 0, 2160).unwrap_err(),
+            generate_bundle(&default_layout(), "x", 0, 2160, &Style::default()).unwrap_err(),
             SkinError::BadScreen(0, 2160)
         ));
-        let files = generate_bundle(&default_layout(), "My Skin!", 3840, 2160).unwrap();
+        let files =
+            generate_bundle(&default_layout(), "My Skin!", 3840, 2160, &Style::default()).unwrap();
         assert!(files[0].0.starts_with("uifiles/my_skin/"));
     }
 
@@ -454,7 +675,7 @@ mod tests {
     fn a_resolution_change_rescales_positions() {
         let mut layout = Layout(BTreeMap::new());
         layout.0.insert("PlayerWindow".into(), (960, 540, 660, 320));
-        let files = generate_bundle(&layout, "s", 1920, 1080).unwrap();
+        let files = generate_bundle(&layout, "s", 1920, 1080, &Style::default()).unwrap();
         let section = ini_section(bundle_map(&files)[INI_NAME], "PlayerWindow");
         assert!(section.contains("XPos=50.000000%"), "{section}");
         assert!(section.contains("YPos=50.000000%"), "{section}");

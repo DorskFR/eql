@@ -175,18 +175,28 @@ async fn a_client_that_cannot_be_seen_is_never_assumed_to_be_closed() {
     ))
     .unwrap();
 
-    assert_eq!(daemon.tick().await.skins, 0);
-    assert!(server.asked().is_empty());
-    assert!(
-        !root.path().join("uifiles").exists(),
-        "the client's files are left alone when the game cannot be found"
+    assert_eq!(
+        daemon.tick().await.skins,
+        1,
+        "the skin folder is ours to write"
     );
-    assert!(daemon.state().skin.is_none());
+    assert!(
+        root.path().join("uifiles").exists(),
+        "sizes land even when the client cannot be found"
+    );
+    assert!(
+        !root.path().join("UI_Dorsk_erudin_LO1.ini").exists(),
+        "the client's ini is never written when it cannot be seen"
+    );
+    assert!(
+        daemon.state().skin.as_ref().unwrap().ini_digest.is_none(),
+        "the ini is still owed"
+    );
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn the_skin_waits_for_the_game_to_close() {
+async fn the_positions_wait_for_the_game_to_close() {
     let server = Server::default();
     server.serve(FIRST);
     let addr = spawn_server(server.clone()).await;
@@ -208,12 +218,25 @@ async fn the_skin_waits_for_the_game_to_close() {
         &format!("process = {:?}", process),
     ))
     .unwrap();
-    assert_eq!(daemon.tick().await.skins, 0);
-    assert!(server.asked().is_empty());
+    assert_eq!(
+        daemon.tick().await.skins,
+        1,
+        "sizes land under a live client"
+    );
+    assert!(root.path().join("uifiles").exists());
+    assert!(
+        !root.path().join("UI_Dorsk_erudin_LO1.ini").exists(),
+        "positions are the client's while it is running"
+    );
 
     game.kill().await.unwrap();
     game.wait().await.unwrap();
-    assert_eq!(daemon.tick().await.skins, 1, "and lands once it exits");
+    assert_eq!(daemon.tick().await.skins, 1, "the ini lands once it exits");
+    assert!(
+        root.path().join("UI_Dorsk_erudin_LO1.ini").exists(),
+        "and the positions are written then"
+    );
+    assert_eq!(daemon.tick().await.skins, 0, "nothing is owed after that");
 }
 
 #[tokio::test]

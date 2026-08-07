@@ -1,8 +1,10 @@
 pub mod backoff;
+pub mod channel;
 pub mod config;
 #[cfg(windows)]
 pub mod ctrl;
 pub mod daemon;
+pub mod export;
 pub mod fights;
 pub mod harvest;
 #[cfg(windows)]
