@@ -8,8 +8,10 @@ const FIGHT_PAGE = 50;
 export const qk = {
 	characters: ['characters'] as const,
 	character: (server: string, name: string) => ['character', server, name] as const,
-	inventory: (server: string, name: string) => ['inventory', server, name] as const,
-	stats: (server: string, name: string) => ['stats', server, name] as const,
+	inventory: (server: string, name: string, loadout: string) =>
+		['inventory', server, name, loadout] as const,
+	stats: (server: string, name: string, loadout: string) =>
+		['stats', server, name, loadout] as const,
 	events: (server: string, name: string) => ['events', server, name] as const,
 	fights: (server: string, name: string) => ['fights', server, name] as const,
 	harvest: (server: string, name: string, kind: HarvestKind) =>
@@ -34,17 +36,21 @@ export const useCharacter = (server: () => string, name: () => string) =>
 		retry: false
 	}));
 
-export const useInventory = (server: () => string, name: () => string) =>
+export const useInventory = (
+	server: () => string,
+	name: () => string,
+	loadout: () => string
+) =>
 	createQuery(() => ({
-		queryKey: qk.inventory(server(), name()),
-		queryFn: () => endpoints.inventory(server(), name()),
+		queryKey: qk.inventory(server(), name(), loadout()),
+		queryFn: () => endpoints.inventory(server(), name(), loadout()),
 		refetchInterval: REFETCH_MS
 	}));
 
-export const useStats = (server: () => string, name: () => string) =>
+export const useStats = (server: () => string, name: () => string, loadout: () => string) =>
 	createQuery(() => ({
-		queryKey: qk.stats(server(), name()),
-		queryFn: () => endpoints.stats(server(), name()),
+		queryKey: qk.stats(server(), name(), loadout()),
+		queryFn: () => endpoints.stats(server(), name(), loadout()),
 		refetchInterval: REFETCH_MS
 	}));
 
