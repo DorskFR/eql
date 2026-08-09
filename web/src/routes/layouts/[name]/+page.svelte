@@ -14,7 +14,7 @@
 		Stack,
 		Text
 	} from '@dorsk/tsumikit';
-	import { bundleUrl, endpoints, type Rect } from '$lib/api';
+	import { bundleUrl, endpoints, type LayoutStyle, type Rect } from '$lib/api';
 	import { clamp, GRID, snap, tokenStore, validate } from '$lib/layout';
 	import { useLayout } from '$lib/queries';
 
@@ -23,6 +23,8 @@
 
 	const CANVAS_W = 960;
 
+	let style = $state<LayoutStyle>({});
+	let section = $state('');
 	let layout = $state<Record<string, Rect>>({});
 	let screenW = $state(3840);
 	let screenH = $state(2160);
@@ -39,6 +41,7 @@
 		if (!data || loaded === data.updated_at) return;
 		loaded = data.updated_at;
 		layout = structuredClone(data.layout);
+		style = structuredClone(data.style ?? {});
 		screenW = data.screen_w;
 		screenH = data.screen_h;
 		skin ||= data.name;
@@ -48,8 +51,28 @@
 	const scale = $derived(CANVAS_W / screenW);
 	const canvasH = $derived(Math.round(screenH * scale));
 	const windows = $derived(Object.entries(layout).sort(([a], [b]) => a.localeCompare(b)));
-	const problems = $derived(validate(layout, screenW, screenH));
+	const hidden = $derived(style.hidden ?? []);
+	const bare = $derived(style.bare ?? []);
+	const problems = $derived(validate(layout, screenW, screenH, hidden));
 	const current = $derived(selected ? layout[selected] : undefined);
+	const extras = $derived(hidden.filter((window) => !(window in layout)));
+
+	function toggle(key: 'hidden' | 'bare', window: string) {
+		const list = style[key] ?? [];
+		style = {
+			...style,
+			[key]: list.includes(window)
+				? list.filter((name) => name !== window)
+				: [...list, window].sort()
+		};
+	}
+
+	function addSection() {
+		const name = section.trim();
+		if (!name || hidden.includes(name)) return;
+		style = { ...style, hidden: [...hidden, name].sort() };
+		section = '';
+	}
 
 	let drag = $state<{ name: string; mode: 'move' | 'resize'; x: number; y: number; from: Rect } | null>(
 		null
@@ -116,7 +139,8 @@
 			const saved = await endpoints.saveLayout(token, name, {
 				screen_w: screenW,
 				screen_h: screenH,
-				layout
+				layout,
+				style
 			});
 			loaded = saved.updated_at;
 			message = saved.problems.length
@@ -200,7 +224,7 @@
 				>
 					<rect x="0" y="0" width={screenW} height={screenH} class="screen" />
 					{#each windows as [window, rect] (window)}
-						<g class:selected={selected === window}>
+						<g class:selected={selected === window} class:hidden={hidden.includes(window)}>
 							<rect
 								x={rect[0]}
 								y={rect[1]}
@@ -279,9 +303,56 @@
 									/>
 								</Field>
 							</Cluster>
+							<Cluster gap="var(--sp-2)">
+								<Button
+									size="sm"
+									variant={hidden.includes(selected!) ? 'primary' : 'ghost'}
+									onclick={() => toggle('hidden', selected!)}
+								>
+									{hidden.includes(selected!) ? 'Hidden' : 'Hide'}
+								</Button>
+								<Button
+									size="sm"
+									variant={bare.includes(selected!) ? 'primary' : 'ghost'}
+									onclick={() => toggle('bare', selected!)}
+								>
+									{bare.includes(selected!) ? 'Transparent' : 'Make transparent'}
+								</Button>
+							</Cluster>
 						{:else}
 							<Text tone="muted">Pick a window on the canvas.</Text>
 						{/if}
+					</Stack>
+				</Card>
+
+				<Card>
+					<Stack gap="var(--sp-2)">
+						<Heading level={3} size="sm">Other hidden panels</Heading>
+						<Text tone="muted" size="sm">
+							Ini sections the layout does not place — toolbars, the map, the stance bar.
+						</Text>
+						{#if extras.length}
+							<Cluster gap="var(--sp-1)">
+								{#each extras as window (window)}
+									<Button size="sm" variant="ghost" onclick={() => toggle('hidden', window)}>
+										{window} ✕
+									</Button>
+								{/each}
+							</Cluster>
+						{/if}
+						<Cluster gap="var(--sp-2)">
+							<Field label="Section" for="hide-section">
+								<Input
+									id="hide-section"
+									bind:value={section}
+									mono
+									size="sm"
+									placeholder="EQMainWnd"
+									onkeydown={(event: KeyboardEvent) => event.key === 'Enter' && addSection()}
+								/>
+							</Field>
+							<Button size="sm" onclick={addSection} disabled={!section.trim()}>Hide</Button>
+						</Cluster>
 					</Stack>
 				</Card>
 
@@ -339,6 +410,13 @@
 	}
 	g.selected .window {
 		stroke-width: 10;
+	}
+	g.hidden .window {
+		fill: none;
+		stroke-dasharray: 24 16;
+	}
+	g.hidden .label {
+		opacity: 0.5;
 	}
 	.label {
 		fill: var(--fg);

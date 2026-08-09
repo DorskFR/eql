@@ -21,6 +21,7 @@
 						<Heading level={1} size="lg">eql</Heading>
 					</Link>
 					<Link href="/layouts">Layouts</Link>
+					<Link href="/devices">Devices</Link>
 				</Cluster>
 				<ThemePicker />
 			</Cluster>

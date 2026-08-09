@@ -1,12 +1,12 @@
 use eqld::{
     config::Config,
     daemon::Daemon,
-    icons, install,
+    diag, icons, install,
     lock::{self, Lock},
     skin, socials,
 };
 use std::path::PathBuf;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 const SUBCOMMANDS: &[&str] = &[
     "install-skin",
@@ -50,11 +50,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Invocation { path, force, rest } = split_args(std::env::args().skip(1).collect());
     let config = Config::load(&path)?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_ansi(config.log.colour())
+    let buffer = std::sync::Arc::new(diag::Buffer::new(diag::CAPACITY));
+    let session = diag::session_id();
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(tracing_subscriber::fmt::layer().with_ansi(config.log.colour()))
+        .with(diag::Capture::new(buffer.clone()))
         .init();
 
     if let Some(subcommand) = rest.first() {
@@ -85,7 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let mut daemon = Daemon::new(config)?.watching(path.clone());
+    let mut daemon = Daemon::new(config)?
+        .watching(path.clone())
+        .capturing(buffer, session);
 
     let harvest = daemon
         .config()
@@ -106,6 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         skin = ?daemon.config().skin.wanted(),
         lock = %guard.path().display(),
         pid = guard.holder().pid,
+        device = %daemon.config().log.device(),
+        session = daemon.session().unwrap_or("off"),
+        log_upload = daemon.config().log.upload,
         "eqld starting"
     );
 

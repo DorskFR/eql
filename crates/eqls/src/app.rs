@@ -63,6 +63,17 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             put(put_layout).delete(delete_layout),
         )
         .route("/api/v1/layouts/{name}/clone-default", post(clone_default))
+        .route("/api/v1/layouts/{name}/clone/{preset}", post(clone_preset))
+        .route("/api/v1/device-logs", post(ingest_device_logs))
+        .route("/api/v1/devices", get(list_devices))
+        .route(
+            "/api/v1/devices/{device}/sessions",
+            get(list_device_sessions),
+        )
+        .route(
+            "/api/v1/devices/{device}/sessions/{session}",
+            get(get_device_session),
+        )
         .layer(from_fn_with_state(state.clone(), require_machine_token));
 
     let api = Router::new()
@@ -95,6 +106,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
         .route("/api/v1/layouts/{name}", get(get_layout))
         .route("/api/v1/layouts/{name}/bundle", get(layout_bundle))
         .route("/api/v1/layout-windows", get(layout_windows))
+        .route("/api/v1/layout-presets", get(layout_presets))
         .merge(ingest);
 
     let index = web_dist.join("index.html");
@@ -190,6 +202,7 @@ async fn ingest(
     .bind(upload.raw.as_deref())
     .fetch_one(&mut *tx)
     .await?;
+    attribute_snapshots(&mut tx, character_id).await?;
     tx.commit().await?;
 
     tracing::info!(
@@ -282,6 +295,10 @@ async fn ingest_events(
         .execute(&mut *tx)
         .await?;
     }
+    for who in sightings(&batch.events) {
+        record_loadout(&mut tx, character_id, &who).await?;
+    }
+    attribute_snapshots(&mut tx, character_id).await?;
     tx.commit().await?;
 
     tracing::info!(
@@ -323,6 +340,92 @@ fn newest_identity(events: &[eql_core::api::LogEvent]) -> Option<Identity> {
             _ => None,
         })
         .max_by_key(|(at, ..)| *at)
+}
+
+struct Sighting {
+    at: OffsetDateTime,
+    level: i32,
+    classes: Vec<String>,
+}
+
+/// Every `/who` in the batch, not just the newest: an old one still proves the
+/// loadout existed.
+fn sightings(events: &[eql_core::api::LogEvent]) -> Vec<Sighting> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            LogEventKind::Who { level, classes, .. } if !classes.is_empty() => Some(Sighting {
+                at: OffsetDateTime::from_unix_timestamp(event.at).ok()?,
+                level: i32::try_from(*level).ok()?,
+                classes: classes.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Class order is however the game printed it, so identity is the sorted set.
+async fn record_loadout(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    character_id: i64,
+    who: &Sighting,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into character_loadouts \
+             (character_id, classes, level, first_seen_at, last_seen_at) \
+         values ($1, $2, $3, $4, $4) \
+         on conflict (character_id, class_key) do update set \
+             classes = case when excluded.last_seen_at >= character_loadouts.last_seen_at \
+                            then excluded.classes else character_loadouts.classes end, \
+             level = case when excluded.last_seen_at >= character_loadouts.last_seen_at \
+                          then excluded.level else character_loadouts.level end, \
+             first_seen_at = least(character_loadouts.first_seen_at, excluded.first_seen_at), \
+             last_seen_at = greatest(character_loadouts.last_seen_at, excluded.last_seen_at)",
+    )
+    .bind(character_id)
+    .bind(&who.classes)
+    .bind(who.level)
+    .bind(who.at)
+    .execute(&mut **tx)
+    .await
+    .map(drop)
+}
+
+/// Snapshots and `/who` rows arrive on independent schedules, so attribution is
+/// redone for the whole character whenever either side gains a row.
+async fn attribute_snapshots(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    character_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("select attribute_snapshots($1)")
+        .bind(character_id)
+        .execute(&mut **tx)
+        .await
+        .map(drop)
+}
+
+fn loadout_key(raw: &str) -> Option<String> {
+    let mut classes: Vec<String> = raw
+        .split(['/', '-', ',', ' ', '+'])
+        .filter(|part| !part.is_empty())
+        .map(str::to_uppercase)
+        .collect();
+    if classes.is_empty() {
+        return None;
+    }
+    classes.sort();
+    Some(classes.join("/"))
+}
+
+#[derive(Deserialize)]
+struct LoadoutQuery {
+    loadout: Option<String>,
+}
+
+impl LoadoutQuery {
+    fn key(&self) -> Option<String> {
+        self.loadout.as_deref().and_then(loadout_key)
+    }
 }
 
 /// The kind tag rides in its own column, so it is stripped from the payload.
@@ -680,6 +783,21 @@ struct CharacterView {
     classes: Vec<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     identity_at: Option<OffsetDateTime>,
+    loadouts: Vec<LoadoutView>,
+}
+
+#[derive(Serialize)]
+struct LoadoutView {
+    key: String,
+    classes: Vec<String>,
+    level: Option<i32>,
+    #[serde(with = "time::serde::rfc3339")]
+    first_seen_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    last_seen_at: OffsetDateTime,
+    snapshot_count: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_snapshot_at: Option<OffsetDateTime>,
 }
 
 async fn get_character(
@@ -687,7 +805,7 @@ async fn get_character(
     Path((server, name)): Path<(String, String)>,
 ) -> Result<Json<CharacterView>, AppError> {
     let row = sqlx::query(
-        "select name, server, level, race, classes, identity_at from characters \
+        "select id, name, server, level, race, classes, identity_at from characters \
          where lower(server) = lower($1) and lower(name) = lower($2) limit 1",
     )
     .bind(&server)
@@ -697,6 +815,7 @@ async fn get_character(
     .ok_or(AppError::NotFound)?;
 
     Ok(Json(CharacterView {
+        loadouts: loadouts_of(&state.pool, row.try_get("id")?).await?,
         name: row.try_get("name")?,
         server: row.try_get("server")?,
         level: row.try_get("level")?,
@@ -706,6 +825,35 @@ async fn get_character(
             .unwrap_or_default(),
         identity_at: row.try_get("identity_at")?,
     }))
+}
+
+async fn loadouts_of(pool: &PgPool, character_id: i64) -> Result<Vec<LoadoutView>, sqlx::Error> {
+    let rows = sqlx::query(
+        "select l.class_key, l.classes, l.level, l.first_seen_at, l.last_seen_at, \
+                count(s.id) as snapshot_count, max(s.captured_at) as last_snapshot_at \
+         from character_loadouts l \
+         left join inventory_snapshots s on s.loadout_id = l.id \
+         where l.character_id = $1 \
+         group by l.id \
+         order by l.last_seen_at desc",
+    )
+    .bind(character_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter()
+        .map(|row| {
+            Ok(LoadoutView {
+                key: row.try_get("class_key")?,
+                classes: row.try_get("classes")?,
+                level: row.try_get("level")?,
+                first_seen_at: row.try_get("first_seen_at")?,
+                last_seen_at: row.try_get("last_seen_at")?,
+                snapshot_count: row.try_get("snapshot_count")?,
+                last_snapshot_at: row.try_get("last_snapshot_at")?,
+            })
+        })
+        .collect()
 }
 
 async fn list_characters(
@@ -742,6 +890,8 @@ struct InventoryView {
     server: String,
     #[serde(with = "time::serde::rfc3339")]
     captured_at: OffsetDateTime,
+    loadout: Option<String>,
+    classes: Vec<String>,
     entries: Vec<InventoryEntryView>,
 }
 
@@ -833,19 +983,29 @@ struct Snapshot {
     server: String,
     captured_at: OffsetDateTime,
     entries: Vec<InventoryEntry>,
+    loadout: Option<String>,
+    classes: Vec<String>,
 }
 
-async fn latest_snapshot(pool: &PgPool, server: &str, name: &str) -> Result<Snapshot, AppError> {
+async fn latest_snapshot(
+    pool: &PgPool,
+    server: &str,
+    name: &str,
+    loadout: Option<&str>,
+) -> Result<Snapshot, AppError> {
     let row = sqlx::query(
-        "select c.name, c.server, s.captured_at, s.entries \
+        "select c.name, c.server, s.captured_at, s.entries, l.class_key, l.classes \
          from characters c \
          join inventory_snapshots s on s.character_id = c.id \
+         left join character_loadouts l on l.id = s.loadout_id \
          where lower(c.server) = lower($1) and lower(c.name) = lower($2) \
+           and ($3::text is null or l.class_key = $3) \
          order by s.captured_at desc, s.id desc \
          limit 1",
     )
     .bind(server)
     .bind(name)
+    .bind(loadout)
     .fetch_optional(pool)
     .await?
     .ok_or(AppError::NotFound)?;
@@ -856,6 +1016,10 @@ async fn latest_snapshot(pool: &PgPool, server: &str, name: &str) -> Result<Snap
         server: row.try_get("server")?,
         captured_at: row.try_get("captured_at")?,
         entries: entries.0,
+        loadout: row.try_get("class_key")?,
+        classes: row
+            .try_get::<Option<Vec<String>>, _>("classes")?
+            .unwrap_or_default(),
     })
 }
 
@@ -989,12 +1153,15 @@ async fn fill_dump_icons(
 async fn latest_inventory(
     State(state): State<AppState>,
     Path((server, name)): Path<(String, String)>,
+    Query(query): Query<LoadoutQuery>,
 ) -> Result<Json<InventoryView>, AppError> {
-    let snapshot = latest_snapshot(&state.pool, &server, &name).await?;
+    let snapshot = latest_snapshot(&state.pool, &server, &name, query.key().as_deref()).await?;
     Ok(Json(InventoryView {
         character: snapshot.character,
         server: snapshot.server,
         captured_at: snapshot.captured_at,
+        loadout: snapshot.loadout,
+        classes: snapshot.classes,
         entries: join_items(&state.pool, snapshot.entries).await?,
     }))
 }
@@ -1005,6 +1172,8 @@ struct StatsView {
     server: String,
     #[serde(with = "time::serde::rfc3339")]
     captured_at: OffsetDateTime,
+    loadout: Option<String>,
+    classes: Vec<String>,
     stats: GearStats,
     equipped: Vec<InventoryEntryView>,
 }
@@ -1012,8 +1181,9 @@ struct StatsView {
 async fn character_stats(
     State(state): State<AppState>,
     Path((server, name)): Path<(String, String)>,
+    Query(query): Query<LoadoutQuery>,
 ) -> Result<Json<StatsView>, AppError> {
-    let snapshot = latest_snapshot(&state.pool, &server, &name).await?;
+    let snapshot = latest_snapshot(&state.pool, &server, &name, query.key().as_deref()).await?;
     let views = join_items(&state.pool, snapshot.entries).await?;
 
     let pairs: Vec<(InventoryEntry, Option<ItemStats>)> = views
@@ -1032,6 +1202,8 @@ async fn character_stats(
         character: snapshot.character,
         server: snapshot.server,
         captured_at: snapshot.captured_at,
+        loadout: snapshot.loadout,
+        classes: snapshot.classes,
         stats: derive_gear_stats(&pairs),
         equipped: views
             .into_iter()
@@ -1129,7 +1301,7 @@ fn layout_from_row(row: &sqlx::postgres::PgRow) -> Result<LayoutView, sqlx::Erro
         name: row.try_get("name")?,
         screen_w,
         screen_h,
-        problems: layout.0.validate(screen_w, screen_h),
+        problems: layout.0.validate(screen_w, screen_h, &style.0.hidden),
         layout: layout.0,
         style: style.0,
         updated_at: row.try_get("updated_at")?,
@@ -1234,6 +1406,198 @@ async fn clone_default(
         },
     )
     .await
+}
+
+#[derive(Deserialize)]
+struct DeviceLogUpload {
+    device: String,
+    session: String,
+    seq: i64,
+    #[serde(default)]
+    dropped: i64,
+    at: Option<i64>,
+    lines: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DeviceLogAccepted {
+    stored: usize,
+}
+
+async fn ingest_device_logs(
+    State(state): State<AppState>,
+    Json(upload): Json<DeviceLogUpload>,
+) -> Result<(StatusCode, Json<DeviceLogAccepted>), AppError> {
+    if upload.device.trim().is_empty() || upload.session.trim().is_empty() {
+        return Err(AppError::EmptyDevice);
+    }
+    if upload.lines.is_empty() {
+        return Err(AppError::EmptyLogLines);
+    }
+    let at = match upload.at {
+        Some(unix) => {
+            OffsetDateTime::from_unix_timestamp(unix).map_err(|_| AppError::BadCapturedAt(unix))?
+        }
+        None => OffsetDateTime::now_utc(),
+    };
+
+    let stored = sqlx::query(
+        "insert into device_logs (device, session, seq, at, dropped, lines) \
+         values ($1, $2, $3, $4, $5, $6) on conflict (device, session, seq) do nothing",
+    )
+    .bind(upload.device.trim())
+    .bind(upload.session.trim())
+    .bind(upload.seq)
+    .bind(at)
+    .bind(upload.dropped)
+    .bind(SqlJson(&upload.lines))
+    .execute(&state.pool)
+    .await?
+    .rows_affected() as usize;
+
+    prune_device_logs(&state.pool).await?;
+    Ok((StatusCode::ACCEPTED, Json(DeviceLogAccepted { stored })))
+}
+
+/// Diagnostics are worth keeping only as long as a bug hunt lasts, and nothing
+/// else in the schema expires on its own.
+const DEVICE_LOG_DAYS: i64 = 14;
+
+async fn prune_device_logs(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("delete from device_logs where at < now() - make_interval(days => $1::int)")
+        .bind(DEVICE_LOG_DAYS as i32)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct DeviceSummary {
+    device: String,
+    sessions: i64,
+    lines: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    last_at: OffsetDateTime,
+}
+
+async fn list_devices(State(state): State<AppState>) -> Result<Json<Vec<DeviceSummary>>, AppError> {
+    let rows = sqlx::query(
+        "select device, count(distinct session) as sessions, \
+                coalesce(sum(jsonb_array_length(lines)), 0) as lines, max(at) as last_at \
+         from device_logs group by device order by max(at) desc",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                Ok(DeviceSummary {
+                    device: row.try_get("device")?,
+                    sessions: row.try_get("sessions")?,
+                    lines: row.try_get("lines")?,
+                    last_at: row.try_get("last_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+    ))
+}
+
+#[derive(Serialize)]
+struct SessionSummary {
+    session: String,
+    lines: i64,
+    dropped: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    started_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    last_at: OffsetDateTime,
+}
+
+async fn list_device_sessions(
+    State(state): State<AppState>,
+    Path(device): Path<String>,
+) -> Result<Json<Vec<SessionSummary>>, AppError> {
+    let rows = sqlx::query(
+        "select session, coalesce(sum(jsonb_array_length(lines)), 0) as lines, \
+                coalesce(sum(dropped), 0)::bigint as dropped, min(at) as started_at, max(at) as last_at \
+         from device_logs where device = $1 group by session order by max(at) desc limit 200",
+    )
+    .bind(&device)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                Ok(SessionSummary {
+                    session: row.try_get("session")?,
+                    lines: row.try_get("lines")?,
+                    dropped: row.try_get("dropped")?,
+                    started_at: row.try_get("started_at")?,
+                    last_at: row.try_get("last_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?,
+    ))
+}
+
+#[derive(Serialize)]
+struct SessionLog {
+    device: String,
+    session: String,
+    dropped: i64,
+    lines: Vec<String>,
+}
+
+async fn get_device_session(
+    State(state): State<AppState>,
+    Path((device, session)): Path<(String, String)>,
+) -> Result<Json<SessionLog>, AppError> {
+    let rows = sqlx::query(
+        "select dropped, lines from device_logs \
+         where device = $1 and session = $2 order by seq asc",
+    )
+    .bind(&device)
+    .bind(&session)
+    .fetch_all(&state.pool)
+    .await?;
+    if rows.is_empty() {
+        return Err(AppError::NotFound);
+    }
+    let mut lines = Vec::new();
+    let mut dropped = 0i64;
+    for row in &rows {
+        dropped += row.try_get::<i64, _>("dropped")?;
+        let chunk: SqlJson<Vec<String>> = row.try_get("lines")?;
+        lines.extend(chunk.0);
+    }
+    Ok(Json(SessionLog {
+        device,
+        session,
+        dropped,
+        lines,
+    }))
+}
+
+async fn clone_preset(
+    State(state): State<AppState>,
+    Path((name, preset)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<LayoutView>), AppError> {
+    let preset = skin::preset(&preset).ok_or(AppError::NotFound)?;
+    store_layout(
+        &state.pool,
+        &name,
+        LayoutBody {
+            screen_w: preset.screen_w,
+            screen_h: preset.screen_h,
+            layout: preset.layout,
+            style: preset.style,
+        },
+    )
+    .await
+}
+
+async fn layout_presets() -> Json<Vec<&'static str>> {
+    Json(skin::preset_names().collect())
 }
 
 async fn delete_layout(
@@ -1395,6 +1759,10 @@ enum AppError {
     BadCursor(String),
     #[error("captured_at {0} is not a valid unix timestamp")]
     BadCapturedAt(i64),
+    #[error("device and session must not be empty")]
+    EmptyDevice,
+    #[error("a device log upload must contain at least one line")]
+    EmptyLogLines,
     #[error("layout name must not be empty")]
     EmptyLayoutName,
     #[error("screen size must be positive, got {0}x{1}")]
@@ -1422,6 +1790,8 @@ impl IntoResponse for AppError {
             | AppError::UnknownHarvestKind(_)
             | AppError::BadCapturedAt(_)
             | AppError::EmptyLayoutName
+            | AppError::EmptyDevice
+            | AppError::EmptyLogLines
             | AppError::BadScreen(_, _)
             | AppError::Skin(_)
             | AppError::Icon(_)
@@ -1616,6 +1986,131 @@ mod tests {
         Some((app, pool))
     }
 
+    #[tokio::test]
+    async fn device_logs_land_dedupe_and_read_back_in_order() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+        sqlx::query("truncate device_logs restart identity")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let post = |body: String| {
+            layout_write("POST", "/api/v1/device-logs", Some("s3cret"), &body.clone())
+        };
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let first = format!(
+            r#"{{"device":"phone","session":"s1","seq":0,"dropped":0,"at":{now},
+            "lines":["{now} INFO  eqld eqld starting","{now} WARN  eqld skin held"]}}"#
+        );
+        let (status, accepted) = json_of(&app, post(first.clone())).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(accepted["stored"], 1);
+
+        let (status, again) = json_of(&app, post(first)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(again["stored"], 0, "a retried batch is not stored twice");
+
+        let second = format!(
+            r#"{{"device":"phone","session":"s1","seq":1,"dropped":3,"at":{},
+            "lines":["{} INFO  eqld exported"]}}"#,
+            now + 100,
+            now + 100
+        );
+        assert_eq!(json_of(&app, post(second)).await.0, StatusCode::ACCEPTED);
+
+        let other = format!(
+            r#"{{"device":"desktop","session":"s9","seq":0,"at":{},
+            "lines":["{} INFO  eqld hello"]}}"#,
+            now + 200,
+            now + 200
+        );
+        assert_eq!(json_of(&app, post(other)).await.0, StatusCode::ACCEPTED);
+
+        let read = |uri: &str| {
+            Request::builder()
+                .uri(uri.to_string())
+                .header("authorization", "Bearer s3cret")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, devices) = json_of(&app, read("/api/v1/devices")).await;
+        assert_eq!(status, StatusCode::OK);
+        let devices = devices.as_array().unwrap().clone();
+        assert_eq!(devices.len(), 2);
+        let phone = devices
+            .iter()
+            .find(|row| row["device"] == "phone")
+            .expect("the phone is listed");
+        assert_eq!(phone["sessions"], 1);
+        assert_eq!(phone["lines"], 3);
+
+        let (status, sessions) = json_of(&app, read("/api/v1/devices/phone/sessions")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sessions[0]["session"], "s1");
+        assert_eq!(sessions[0]["lines"], 3);
+        assert_eq!(sessions[0]["dropped"], 3);
+
+        let (status, log) = json_of(&app, read("/api/v1/devices/phone/sessions/s1")).await;
+        assert_eq!(status, StatusCode::OK);
+        let lines = log["lines"].as_array().unwrap().clone();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].as_str().unwrap().contains("eqld starting"));
+        assert_eq!(
+            lines[2].as_str().unwrap(),
+            format!("{} INFO  eqld exported", now + 100),
+            "batches concatenate in sequence order"
+        );
+
+        assert_eq!(
+            status_of_request(&app, read("/api/v1/devices/phone/sessions/nope")).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn device_logs_need_the_machine_token_and_refuse_empty_uploads() {
+        for request in [
+            layout_write("POST", "/api/v1/device-logs", None, "{}"),
+            Request::builder()
+                .uri("/api/v1/devices")
+                .body(Body::empty())
+                .unwrap(),
+        ] {
+            assert_eq!(status_of(request).await, StatusCode::UNAUTHORIZED);
+        }
+
+        let empty = r#"{"device":"phone","session":"s1","seq":0,"lines":[]}"#;
+        assert_eq!(
+            status_of(layout_write(
+                "POST",
+                "/api/v1/device-logs",
+                Some("s3cret"),
+                empty
+            ))
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let nameless = r#"{"device":" ","session":"s1","seq":0,"lines":["x"]}"#;
+        assert_eq!(
+            status_of(layout_write(
+                "POST",
+                "/api/v1/device-logs",
+                Some("s3cret"),
+                nameless
+            ))
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    async fn status_of_request(app: &Router, request: Request<Body>) -> StatusCode {
+        app.clone().oneshot(request).await.unwrap().status()
+    }
+
     async fn json_of(app: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
         let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status();
@@ -1773,6 +2268,121 @@ mod tests {
         assert_eq!(view["race"], serde_json::Value::Null);
         assert_eq!(view["classes"], serde_json::json!([]));
         assert_eq!(view["identity_at"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_loadout_is_its_class_set_however_it_is_written() {
+        let key = |raw| loadout_key(raw).unwrap();
+        assert_eq!(key("SHD/DRU/ENC"), "DRU/ENC/SHD");
+        assert_eq!(key("shd-dru-enc"), "DRU/ENC/SHD");
+        assert_eq!(key("enc, dru ,shd"), "DRU/ENC/SHD");
+        assert_eq!(key("shd"), "SHD");
+        assert_eq!(loadout_key(""), None);
+        assert_eq!(loadout_key("///"), None);
+    }
+
+    const T1: i64 = 1_785_958_164;
+    const T2: i64 = T1 + 86_400;
+    const T3: i64 = T1 + 172_800;
+
+    fn post_who(at: i64, classes: [&str; 3]) -> Request<Body> {
+        let classes = classes
+            .iter()
+            .map(|class| format!("{class:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        post_events(
+            "s3cret",
+            &format!(
+                r#"{{"character":"Dorsk","server":"erudin","events":[
+                    {{"at":{at},"kind":"who","level":50,"classes":[{classes}],"race":"Ogre"}}]}}"#
+            ),
+        )
+    }
+
+    fn post_dump(at: i64, weapon: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/inventory")
+            .header("authorization", "Bearer s3cret")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"character":"Dorsk","server":"erudin","captured_at":{at},"entries":[
+                    {{"location":"Primary","name":{weapon:?},"id":1,"count":1,"slots":0}}]}}"#
+            )))
+            .unwrap()
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn each_class_combination_keeps_its_own_profile() {
+        let Some((app, _pool)) = live_app().await else {
+            return;
+        };
+
+        // The dump lands before the /who that explains it; attribution catches up.
+        assert_eq!(
+            json_of(&app, post_dump(T1 + 5, "Ogre Warhammer")).await.0,
+            StatusCode::CREATED
+        );
+        json_of(&app, post_who(T1, ["SHD", "SHM", "MNK"])).await;
+
+        json_of(&app, post_who(T2, ["SHD", "DRU", "ENC"])).await;
+        json_of(&app, post_dump(T2 + 5, "Gnarled Staff")).await;
+        json_of(&app, post_who(T3, ["SHD", "DRU", "WIZ"])).await;
+        json_of(&app, post_dump(T3 + 5, "Wand of Allure")).await;
+
+        let (status, view) = json_of(&app, get("/api/v1/characters/erudin/Dorsk")).await;
+        assert_eq!(status, StatusCode::OK);
+        let loadouts = view["loadouts"].as_array().unwrap();
+        assert_eq!(loadouts.len(), 3);
+        assert_eq!(loadouts[0]["key"], "DRU/SHD/WIZ");
+        assert_eq!(loadouts[0]["snapshot_count"], 1);
+        assert_eq!(loadouts[2]["key"], "MNK/SHD/SHM");
+        assert_eq!(loadouts[2]["snapshot_count"], 1);
+
+        let weapon =
+            |body: &serde_json::Value| body["entries"][0]["name"].as_str().unwrap().to_string();
+
+        let (status, oldest) = json_of(
+            &app,
+            get("/api/v1/characters/erudin/Dorsk/inventory?loadout=shd-shm-mnk"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(weapon(&oldest), "Ogre Warhammer");
+        assert_eq!(oldest["loadout"], "MNK/SHD/SHM");
+
+        let (_, middle) = json_of(
+            &app,
+            get("/api/v1/characters/erudin/Dorsk/inventory?loadout=DRU/ENC/SHD"),
+        )
+        .await;
+        assert_eq!(weapon(&middle), "Gnarled Staff");
+
+        let (_, newest) = json_of(&app, get("/api/v1/characters/erudin/Dorsk/inventory")).await;
+        assert_eq!(weapon(&newest), "Wand of Allure");
+        assert_eq!(newest["loadout"], "DRU/SHD/WIZ");
+
+        let (_, gear) = json_of(
+            &app,
+            get("/api/v1/characters/erudin/Dorsk/stats?loadout=shd-shm-mnk"),
+        )
+        .await;
+        assert_eq!(gear["loadout"], "MNK/SHD/SHM");
+        assert_eq!(gear["equipped"][0]["name"], "Ogre Warhammer");
+
+        assert_eq!(
+            status_of_request(
+                &app,
+                get("/api/v1/characters/erudin/Dorsk/inventory?loadout=war-clr-pal")
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     fn post_harvest(token: Option<&str>, body: &str) -> Request<Body> {
@@ -2138,6 +2748,25 @@ mod tests {
         let windows = windows.as_array().unwrap().clone();
         assert_eq!(windows.len(), 13);
         assert!(windows.contains(&serde_json::json!("MainChat")));
+
+        let (status, presets) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/layout-presets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        for name in ["default", "light-16x9", "light-16x10"] {
+            assert!(
+                presets
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(name)),
+                "{presets:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2243,6 +2872,54 @@ mod tests {
         let names: Vec<&str> = archive.file_names().collect();
         assert!(names.contains(&"uifiles/my_skin/EQUI_PlayerWindow.xml"));
         assert!(names.contains(&skin::INI_NAME));
+
+        let (status, light) = json_of(
+            &app,
+            layout_write(
+                "POST",
+                "/api/v1/layouts/light%401600x900/clone/light-16x9",
+                Some("s3cret"),
+                "",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(light["screen_w"], 1600);
+        assert_eq!(light["screen_h"], 900);
+        assert_eq!(light["problems"].as_array().unwrap().len(), 0);
+        assert_eq!(light["layout"]["BuffWindow"][1], 0, "buffs sit at the top");
+        assert!(light["style"]["hidden"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("EQMainWnd")));
+        assert!(light["style"]["bare"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("MainChat")));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/layouts/light%401600x900/bundle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "the light bundle builds");
+
+        let missing_preset = app
+            .clone()
+            .oneshot(layout_write(
+                "POST",
+                "/api/v1/layouts/nope/clone/no-such-preset",
+                Some("s3cret"),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing_preset.status(), StatusCode::NOT_FOUND);
 
         let unknown = r#"{"screen_w":3840,"screen_h":2160,"layout":{"BankWindow":[0,0,10,10]}}"#;
         let (status, error) = json_of(

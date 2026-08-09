@@ -71,15 +71,18 @@
 
 	const server = $derived(page.params.server ?? '');
 	const name = $derived(page.params.name ?? '');
+	const picked = $derived(page.url.searchParams.get('loadout') ?? '');
 
 	const inventory = useInventory(
 		() => server,
-		() => name
+		() => name,
+		() => picked
 	);
 
 	const gear = useStats(
 		() => server,
-		() => name
+		() => name,
+		() => picked
 	);
 
 	const events = useEvents(
@@ -93,10 +96,18 @@
 	);
 
 	const who = $derived(character.data?.identity_at ? character.data : null);
-	const classes = $derived(who?.classes.join('/') ?? '');
+	const loadouts = $derived(character.data?.loadouts ?? []);
+	/** The profile on screen belongs to the loadout its snapshot was taken in,
+	 *  which is not always the one the character is wearing right now. */
+	const shown = $derived(loadouts.find((entry) => entry.key === inventory.data?.loadout) ?? null);
+	const classes = $derived((shown?.classes ?? who?.classes ?? []).join('/'));
+	const shownLevel = $derived(shown?.level ?? who?.level);
 	const identityLine = $derived(
-		who ? [`Level ${who.level} ${classes}`.trim(), who.race, server].filter(Boolean).join(' · ') : ''
+		who
+			? [`Level ${shownLevel} ${classes}`.trim(), who.race, server].filter(Boolean).join(' · ')
+			: ''
 	);
+	const loadoutHref = (key: string) => `?loadout=${encodeURIComponent(key)}`;
 
 	const eventRows = $derived(events.data?.pages.flat() ?? []);
 	const loggedLevel = $derived(
@@ -341,7 +352,7 @@
 			<Button href="/" variant="ghost" size="sm">Back</Button>
 			<Heading level={2}>{name}</Heading>
 			{#if who}
-				<Badge tone="neutral">Level {who.level} {classes}</Badge>
+				<Badge tone="neutral">Level {shownLevel} {classes}</Badge>
 			{/if}
 			<Badge tone="info">{server}</Badge>
 		</Cluster>
@@ -351,6 +362,22 @@
 			</Badge>
 		{/if}
 	</Cluster>
+
+	{#if loadouts.length > 1}
+		<Cluster gap="var(--sp-2)">
+			<Text variant="caption">Loadout</Text>
+			{#each loadouts as entry (entry.key)}
+				<Button
+					href={loadoutHref(entry.key)}
+					size="sm"
+					variant={entry.key === shown?.key ? 'primary' : 'ghost'}
+				>
+					{entry.classes.join('/')}
+					{entry.snapshot_count === 0 ? ' · no dump' : ''}
+				</Button>
+			{/each}
+		</Cluster>
+	{/if}
 
 	{#if inventory.isPending}
 		<Card>

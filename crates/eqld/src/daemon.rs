@@ -107,6 +107,7 @@ pub struct TickReport {
     pub socials: usize,
     pub skins: usize,
     pub exports: usize,
+    pub log_lines_uploaded: usize,
 }
 
 /// Whether the client owns its files right now. `Undetectable` is not a
@@ -210,6 +211,14 @@ pub struct Daemon {
     next_install: Option<std::time::Instant>,
     last_skin_check: Option<std::time::Instant>,
     last_export_check: Option<std::time::Instant>,
+    diag: Option<Diag>,
+    diag_note: Notice,
+}
+
+#[derive(Debug, Clone)]
+pub struct Diag {
+    pub buffer: std::sync::Arc<crate::diag::Buffer>,
+    pub session: String,
 }
 
 impl Daemon {
@@ -305,6 +314,8 @@ impl Daemon {
             next_install: None,
             last_skin_check: None,
             last_export_check: None,
+            diag: None,
+            diag_note: Notice::new(),
         })
     }
 
@@ -312,6 +323,66 @@ impl Daemon {
     pub fn watching(mut self, path: PathBuf) -> Self {
         self.config_watch = Some(crate::config::Watch::new(path));
         self
+    }
+
+    pub fn capturing(
+        mut self,
+        buffer: std::sync::Arc<crate::diag::Buffer>,
+        session: String,
+    ) -> Self {
+        self.diag = Some(Diag { buffer, session });
+        self
+    }
+
+    pub fn session(&self) -> Option<&str> {
+        self.diag.as_ref().map(|diag| diag.session.as_str())
+    }
+
+    /// Upload failures are themselves logged, so a batch that keeps failing must
+    /// go back to the buffer without its report piling up behind it.
+    async fn upload_diag(&mut self) -> usize {
+        let Some(diag) = self.diag.clone() else {
+            return 0;
+        };
+        if !self.config.log.upload {
+            return 0;
+        }
+        let batch = diag.buffer.take(crate::diag::BATCH);
+        if batch.is_empty() {
+            return 0;
+        }
+        let count = batch.lines.len();
+        let body = serde_json::json!({
+            "device": self.config.log.device(),
+            "session": diag.session,
+            "seq": batch.seq,
+            "dropped": batch.dropped,
+            "at": crate::diag::unix_now(),
+            "lines": batch.lines,
+        });
+
+        match self.send(self.config.device_logs_endpoint(), &body).await {
+            Ok(status) if status.is_success() => {
+                if self.diag_note.clear() {
+                    tracing::info!("device logs are uploading again");
+                }
+                count
+            }
+            Ok(status) => {
+                diag.buffer.put_back(batch);
+                if self.diag_note.report(status.to_string()) {
+                    tracing::warn!(%status, "device logs rejected; holding them until this changes");
+                }
+                0
+            }
+            Err(err) => {
+                diag.buffer.put_back(batch);
+                if self.diag_note.report(err.to_string()) {
+                    tracing::warn!(%err, "cannot upload device logs; holding them until this changes");
+                }
+                0
+            }
+        }
     }
 
     async fn reload(&mut self) {
@@ -1122,6 +1193,8 @@ impl Daemon {
         } else if report.uploaded > 0 {
             self.backoff.reset();
         }
+
+        report.log_lines_uploaded = self.upload_diag().await;
         report
     }
 

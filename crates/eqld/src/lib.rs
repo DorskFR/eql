@@ -4,6 +4,7 @@ pub mod config;
 #[cfg(windows)]
 pub mod ctrl;
 pub mod daemon;
+pub mod diag;
 pub mod export;
 pub mod fights;
 pub mod harvest;

@@ -33,8 +33,11 @@ impl Layout {
             .map(|(name, &(x, y, w, h))| (name.as_str(), Rect { x, y, w, h }))
     }
 
-    pub fn validate(&self, width: i32, height: i32) -> Vec<String> {
-        let rects: Vec<(&str, Rect)> = self.rects().collect();
+    pub fn validate(&self, width: i32, height: i32, hidden: &[String]) -> Vec<String> {
+        let rects: Vec<(&str, Rect)> = self
+            .rects()
+            .filter(|(name, _)| !hidden.iter().any(|window| window == name))
+            .collect();
         let mut problems = Vec::new();
         for (name, rect) in &rects {
             if !rect.within(width, height) {
@@ -173,16 +176,28 @@ mod tests {
 /// Content scale, which the window rects cannot express: the template bakes
 /// 225 `<Font>` tags and a 64px spell gem, and a phone and a 4K monitor want
 /// different ones at the same pixel count. Empty means leave the template be.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `hidden` and `bare` name ini sections, not layout windows, so they also
+/// reach panels the skin never positions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Style {
     pub font_shift: i32,
     pub gem: Option<i32>,
+    pub hidden: Vec<String>,
+    pub bare: Vec<String>,
 }
 
 impl Style {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    pub fn hides(&self, section: &str) -> bool {
+        self.hidden.iter().any(|name| name == section)
+    }
+
+    pub fn strips(&self, section: &str) -> bool {
+        self.bare.iter().any(|name| name == section)
     }
 
     /// EQ only ships fonts 1..=5; a shift that would leave that range clamps

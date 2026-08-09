@@ -69,6 +69,8 @@ And outside `[tools.log_reader]`:
 | `skin.layout` | — | The layout to install; required when `skin.enabled` is on. |
 | `skin.name` | layout's default | A named skin inside that layout, like `--skin` on the subcommand. |
 | `skin.check_secs` | `300` | Seconds between bundle checks (min 30, or `0` for every tick). |
+| `log.upload` | `true` | Ship eqld's own log to the server so this machine can be debugged remotely. |
+| `log.device` | hostname | What the server files those logs under. |
 
 ### Toggling without a restart
 
@@ -154,10 +156,54 @@ express content scale:
 |-----|------|
 | `font_shift` | Added to every `<Font>` tag, clamped to the 1..=5 the client ships |
 | `gem` | Spell gem cell in px; the 40/64 icon ratio is kept |
+| `hidden` | Ini sections written `Show=0` |
+| `bare` | Ini sections written `BGType=0` and `Border=0` |
 
 That matters more than resolution: 1280x720 on a 6.8" phone wants the *large*
 fonts, the same 1280x720 on a laptop wants small ones. It is DPI, not pixels,
 so the variant states it rather than deriving it.
+
+### Hiding windows, and losing their frames
+
+`hidden` and `bare` name **ini sections**, not layout windows, so they reach the
+panels the skin never positions — `EQMainWnd`, `StanceWnd`, `MapViewWnd`,
+`HotButtonWnd3`..`11`. That is how a phone whose toolbars are replaced by
+Winlator's on-screen controls gets rid of them for good: the client rewrites the
+ini on exit, and the next install asserts the layout again.
+
+`bare` is what the client's own right-click "Background: none" writes, so a
+window keeps its text and loses its frame. Buffs and chat over the world, no box.
+
+A section that the template ini does not carry — or carries without the
+`Show=`/`BGType=` line the change needs — is **refused** when the bundle is
+built, rather than silently doing nothing. `OverseerWnd` has no `Show=`, so
+asking to hide it is an error, not a no-op.
+
+### Presets
+
+```
+GET  /api/v1/layout-presets
+POST /api/v1/layouts/{name}/clone/{preset}
+```
+
+| Preset | Screen | What |
+|--------|--------|------|
+| `default` | 3840x2160 | The dorskui template, all 13 windows |
+| `light-16x9` | 1600x900 | Buffs and songs across the top, chat along the bottom, both transparent; toolbars hidden |
+| `light-16x10` | 1440x900 | The same, refitted for the narrower shape |
+
+The light presets keep player, target, group, pet, one hotbar and the spell gems
+and hide the rest, which leaves the middle of the screen empty to play in. Build
+a channel out of them in two calls:
+
+```sh
+curl -X POST -H "authorization: Bearer $TOKEN" \
+  https://eql.dorsk.dev/api/v1/layouts/light%401600x900/clone/light-16x9
+curl -X POST -H "authorization: Bearer $TOKEN" \
+  https://eql.dorsk.dev/api/v1/layouts/light%401440x900/clone/light-16x10
+```
+
+Then point the machine at `channel = "light"` and `/loadskin light`.
 
 `layout` still works for a single fixed layout; `channel` supersedes it.
 
@@ -215,6 +261,34 @@ Left out, colour is on unless `NO_COLOR` is set. Turn it off where the escape
 codes are printed rather than acted on: a console reached through Wine, or a
 log the daemon is redirected into. Read once at startup, so changing it needs a
 restart.
+
+### Reading a machine's log from the server
+
+eqld keeps its own log in memory and ships it with the rest, so a daemon on a
+phone inside a Winlator container can be debugged without holding the phone:
+
+```toml
+[log]
+upload = true          # default
+device = "phone"       # default: the hostname
+```
+
+Every run gets a session id, and lines are uploaded in numbered batches as they
+appear. A batch the server refuses goes back on the front of the queue and is
+retried under its own number, so a flaky link duplicates nothing. The buffer
+holds 4000 lines and drops the **oldest** first; whatever it dropped is counted
+and reported alongside the session, so a gap is always visible rather than
+silent.
+
+| Route | What |
+|---|---|
+| `GET /api/v1/devices` | Every machine that has checked in |
+| `GET /api/v1/devices/{device}/sessions` | Its runs, newest first |
+| `GET /api/v1/devices/{device}/sessions/{session}` | The lines, in order |
+
+All three need the machine token, unlike the rest of the read API — a daemon log
+names paths and config. The web UI reads them under **Devices**, using the token
+the layout editor already keeps. Uploads are pruned after 14 days.
 
 ### Finding the game
 

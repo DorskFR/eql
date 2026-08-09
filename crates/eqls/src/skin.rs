@@ -58,6 +58,10 @@ pub enum SkinError {
     MissingScreenSize { file: String, item: String },
     #[error("template ini has no [{0}] section")]
     MissingIniSection(String),
+    #[error("unknown ini section {0:?}: nothing in the template ini is named that")]
+    UnknownSection(String),
+    #[error("[{section}] has no {key}= line, so the client would ignore the change")]
+    SectionLacks { section: String, key: String },
     #[error("skin name must contain at least one of a-z, 0-9 or _")]
     EmptySkinName,
     #[error("screen size must be positive, got {0}x{1}")]
@@ -72,6 +76,37 @@ pub fn template_windows() -> impl Iterator<Item = &'static str> {
 
 pub fn default_layout() -> Layout {
     serde_json::from_str(LAYOUT_JSON).expect("embedded template layout.json is valid")
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Preset {
+    pub screen_w: i32,
+    pub screen_h: i32,
+    pub layout: Layout,
+    #[serde(default)]
+    pub style: Style,
+}
+
+const PRESETS: &[(&str, &str)] = &[
+    ("light-16x9", include_str!("../template/light-16x9.json")),
+    ("light-16x10", include_str!("../template/light-16x10.json")),
+];
+
+pub fn preset_names() -> impl Iterator<Item = &'static str> {
+    std::iter::once("default").chain(PRESETS.iter().map(|(name, _)| *name))
+}
+
+pub fn preset(name: &str) -> Option<Preset> {
+    if name == "default" {
+        return Some(Preset {
+            screen_w: TEMPLATE_WIDTH,
+            screen_h: TEMPLATE_HEIGHT,
+            layout: default_layout(),
+            style: Style::default(),
+        });
+    }
+    let (_, json) = PRESETS.iter().find(|(known, _)| *known == name)?;
+    Some(serde_json::from_str(json).expect("embedded preset is valid"))
 }
 
 /// Lowercases and replaces every other byte with `_`, so the name is safe both
@@ -144,7 +179,7 @@ pub fn generate_bundle(
 
     files.push((
         INI_NAME.to_string(),
-        patch_ini(INI, &ini_targets, screen_w, screen_h)?.into_bytes(),
+        patch_ini(INI, &ini_targets, screen_w, screen_h, style)?.into_bytes(),
     ));
     Ok(files)
 }
@@ -253,16 +288,21 @@ fn patch_ini(
     targets: &[(&str, Rect)],
     screen_w: i32,
     screen_h: i32,
+    style: &Style,
 ) -> Result<String, SkinError> {
     let mut seen: Vec<&str> = Vec::new();
+    let mut written: Vec<(&str, Vec<&str>)> = Vec::new();
     let mut out = String::with_capacity(text.len());
     let mut current: Option<Rect> = None;
+    let mut hide = false;
+    let mut strip = false;
 
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
         let ending = &line[body.len()..];
 
         if let Some(section) = body.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            written.push((section, Vec::new()));
             current = targets
                 .iter()
                 .find(|(name, _)| *name == section)
@@ -270,18 +310,29 @@ fn patch_ini(
                     seen.push(name);
                     *rect
                 });
+            hide = style.hides(section);
+            strip = style.strips(section);
             out.push_str(line);
             continue;
         }
 
-        let replacement = current.and_then(|rect| match body.split_once('=') {
+        let geometry = current.and_then(|rect| match body.split_once('=') {
             Some(("XPos", _)) => Some(percent(rect.x, screen_w)),
             Some(("YPos", _)) => Some(percent(rect.y, screen_h)),
             Some(("Width", _)) => Some(rect.w.to_string()),
             Some(("Height", _)) => Some(rect.h.to_string()),
             _ => None,
         });
-        match replacement {
+        let presentation = match body.split_once('=') {
+            Some((key @ "Show", _)) if hide => Some((key, "0".to_string())),
+            Some((key @ ("BGType" | "Border"), _)) if strip => Some((key, "0".to_string())),
+            _ => None,
+        };
+        if let (Some((key, _)), Some(slot)) = (&presentation, written.last_mut()) {
+            slot.1.push(key);
+        }
+        let presentation = presentation.map(|(_, value)| value);
+        match geometry.or(presentation) {
             Some(value) => {
                 let key = body.split_once('=').expect("matched above").0;
                 out.push_str(key);
@@ -295,6 +346,27 @@ fn patch_ini(
 
     if let Some((missing, _)) = targets.iter().find(|(name, _)| !seen.contains(name)) {
         return Err(SkinError::MissingIniSection((*missing).to_string()));
+    }
+    let wrote = |section: &str, key: &str| {
+        written
+            .iter()
+            .any(|(name, keys)| *name == section && keys.contains(&key))
+    };
+    for (section, keys) in style.hidden.iter().map(|name| (name, &["Show"][..])).chain(
+        style
+            .bare
+            .iter()
+            .map(|name| (name, &["BGType", "Border"][..])),
+    ) {
+        if !written.iter().any(|(name, _)| name == section) {
+            return Err(SkinError::UnknownSection(section.clone()));
+        }
+        if let Some(key) = keys.iter().find(|key| !wrote(section, key)) {
+            return Err(SkinError::SectionLacks {
+                section: section.clone(),
+                key: (*key).to_string(),
+            });
+        }
     }
     Ok(out)
 }
@@ -362,7 +434,8 @@ mod tests {
                 source,
                 &Style {
                     font_shift: 1,
-                    gem: None
+                    gem: None,
+                    ..Style::default()
                 }
             ),
             "<Font>4</Font><Font>5</Font><Font>5</Font>"
@@ -372,7 +445,8 @@ mod tests {
                 source,
                 &Style {
                     font_shift: -2,
-                    gem: None
+                    gem: None,
+                    ..Style::default()
                 }
             ),
             "<Font>1</Font><Font>2</Font><Font>3</Font>"
@@ -386,6 +460,7 @@ mod tests {
             &Style {
                 font_shift: 9,
                 gem: None,
+                ..Style::default()
             },
         );
         assert_eq!(shifted, "<Font>5</Font><Font>5</Font>");
@@ -394,6 +469,7 @@ mod tests {
             &Style {
                 font_shift: -9,
                 gem: None,
+                ..Style::default()
             },
         );
         assert_eq!(down, "<Font>1</Font><Font>1</Font>");
@@ -411,6 +487,7 @@ mod tests {
             &Style {
                 font_shift: 0,
                 gem: Some(48),
+                ..Style::default()
             },
         );
         for block in gems(&styled) {
@@ -623,6 +700,184 @@ mod tests {
             assert_eq!(map[format!("uifiles/dorskui/{name}").as_str()], *source);
         }
         assert!(ini_section(map[INI_NAME], "MainChat").contains("Width=30"));
+    }
+
+    fn styled(layout: &Layout, style: &Style) -> String {
+        let files = generate_bundle(layout, "dorskui", TEMPLATE_WIDTH, TEMPLATE_HEIGHT, style)
+            .expect("the style names only real sections");
+        bundle_map(&files)[INI_NAME].to_string()
+    }
+
+    #[test]
+    fn a_hidden_section_is_switched_off_and_nothing_else_moves() {
+        let style = Style {
+            hidden: vec!["StanceWnd".into(), "EQMainWnd".into()],
+            ..Style::default()
+        };
+        let ini = styled(&default_layout(), &style);
+        for section in ["StanceWnd", "EQMainWnd"] {
+            assert!(
+                ini_section(&ini, section).contains("Show=0"),
+                "{section} still shows: {}",
+                ini_section(&ini, section)
+            );
+        }
+        assert!(
+            ini_section(&ini, "BuffWindow").contains("Show=1"),
+            "an unnamed section lost its Show"
+        );
+        assert_eq!(
+            ini.replace("Show=0", "Show=1").len(),
+            INI.len(),
+            "more than the Show lines changed"
+        );
+    }
+
+    /// `BGType=0` is what the client's own right-click "Background: none" writes;
+    /// the frame goes with it, so `Border` follows.
+    #[test]
+    fn a_bare_section_loses_its_background_and_border() {
+        let style = Style {
+            bare: vec!["MainChat".into()],
+            ..Style::default()
+        };
+        let ini = styled(&default_layout(), &style);
+        let chat = ini_section(&ini, "MainChat");
+        assert!(chat.contains("BGType=0"), "{chat}");
+        assert!(chat.contains("Border=0"), "{chat}");
+        assert!(chat.contains("Show=1"), "bare must not also hide: {chat}");
+
+        let buffs = ini_section(&ini, "BuffWindow");
+        assert!(buffs.contains("BGType=1"), "{buffs}");
+        assert!(buffs.contains("Border=1"), "{buffs}");
+    }
+
+    #[test]
+    fn hiding_and_baring_the_same_section_does_both() {
+        let style = Style {
+            hidden: vec!["Chat 1".into()],
+            bare: vec!["Chat 1".into()],
+            ..Style::default()
+        };
+        let section = ini_section(&styled(&default_layout(), &style), "Chat 1").to_string();
+        assert!(section.contains("Show=0"), "{section}");
+        assert!(section.contains("BGType=0"), "{section}");
+        assert!(section.contains("Border=0"), "{section}");
+    }
+
+    #[test]
+    fn a_section_the_template_ini_does_not_have_is_rejected() {
+        let style = Style {
+            hidden: vec!["NoSuchWnd".into()],
+            ..Style::default()
+        };
+        let error = generate_bundle(&default_layout(), "dorskui", 3840, 2160, &style).unwrap_err();
+        assert!(matches!(&error, SkinError::UnknownSection(name) if name == "NoSuchWnd"));
+
+        let bare = Style {
+            bare: vec!["NoSuchWnd".into()],
+            ..Style::default()
+        };
+        assert!(matches!(
+            generate_bundle(&default_layout(), "dorskui", 3840, 2160, &bare).unwrap_err(),
+            SkinError::UnknownSection(_)
+        ));
+    }
+
+    #[test]
+    fn every_preset_is_loadable_clean_and_buildable() {
+        for name in preset_names() {
+            let preset = preset(name).unwrap_or_else(|| panic!("{name} did not load"));
+            assert_eq!(
+                preset
+                    .layout
+                    .validate(preset.screen_w, preset.screen_h, &preset.style.hidden),
+                Vec::<String>::new(),
+                "{name} is not a clean layout"
+            );
+            generate_bundle(
+                &preset.layout,
+                "light",
+                preset.screen_w,
+                preset.screen_h,
+                &preset.style,
+            )
+            .unwrap_or_else(|err| panic!("{name} does not build: {err}"));
+        }
+        assert!(preset("nope").is_none());
+    }
+
+    #[test]
+    fn the_light_presets_put_buffs_on_top_and_chat_at_the_bottom_without_chrome() {
+        for name in ["light-16x9", "light-16x10"] {
+            let preset = preset(name).unwrap();
+            let ini = styled_at(&preset);
+
+            for window in ["BuffWindow", "ShortDurationBuffWindow"] {
+                assert_eq!(
+                    preset.layout.0[window].1, 0,
+                    "{name}: {window} is not at the top"
+                );
+                assert!(ini_section(&ini, window).contains("BGType=0"), "{window}");
+            }
+
+            let (_, y, _, h) = preset.layout.0["MainChat"];
+            assert_eq!(y + h, preset.screen_h, "{name}: chat is not on the bottom");
+            assert!(ini_section(&ini, "MainChat").contains("BGType=0"));
+
+            for gone in ["EQMainWnd", "StanceWnd", "MapViewWnd", "HotButtonWnd2"] {
+                assert!(
+                    ini_section(&ini, gone).contains("Show=0"),
+                    "{name}: {gone} is still shown"
+                );
+            }
+            assert!(ini_section(&ini, "PlayerWindow").contains("Show=1"));
+        }
+    }
+
+    fn styled_at(preset: &Preset) -> String {
+        let files = generate_bundle(
+            &preset.layout,
+            "light",
+            preset.screen_w,
+            preset.screen_h,
+            &preset.style,
+        )
+        .expect("the preset builds");
+        bundle_map(&files)[INI_NAME].to_string()
+    }
+
+    #[test]
+    fn a_section_without_the_key_we_would_write_is_refused() {
+        let style = Style {
+            hidden: vec!["OverseerWnd".into()],
+            ..Style::default()
+        };
+        let error = generate_bundle(&default_layout(), "dorskui", 3840, 2160, &style).unwrap_err();
+        assert!(
+            matches!(&error, SkinError::SectionLacks { section, key } if section == "OverseerWnd" && key == "Show"),
+            "{error}"
+        );
+
+        let bare = Style {
+            bare: vec!["RaidWindow".into()],
+            ..Style::default()
+        };
+        assert!(matches!(
+            generate_bundle(&default_layout(), "dorskui", 3840, 2160, &bare).unwrap_err(),
+            SkinError::SectionLacks { key, .. } if key == "BGType"
+        ));
+    }
+
+    #[test]
+    fn a_hidden_window_is_not_reported_as_overlapping() {
+        let mut layout = Layout(BTreeMap::new());
+        layout.0.insert("PlayerWindow".into(), (0, 0, 100, 100));
+        layout.0.insert("TargetWindow".into(), (50, 50, 100, 100));
+        assert_eq!(layout.validate(1600, 900, &[]).len(), 1);
+        assert!(layout
+            .validate(1600, 900, &["TargetWindow".to_string()])
+            .is_empty());
     }
 
     #[test]

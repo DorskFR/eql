@@ -82,6 +82,18 @@ export interface CharacterSummary {
 	snapshot_count: number;
 }
 
+/** `key` is the class set sorted and joined by `/` — the same loadout however
+ *  the game happened to order it in `/who`. */
+export interface LoadoutView {
+	key: string;
+	classes: string[];
+	level: number | null;
+	first_seen_at: string;
+	last_seen_at: string;
+	snapshot_count: number;
+	last_snapshot_at: string | null;
+}
+
 export interface CharacterView {
 	name: string;
 	server: string;
@@ -89,12 +101,15 @@ export interface CharacterView {
 	race: string | null;
 	classes: string[];
 	identity_at: string | null;
+	loadouts: LoadoutView[];
 }
 
 export interface InventoryView {
 	character: string;
 	server: string;
 	captured_at: string;
+	loadout: string | null;
+	classes: string[];
 	entries: InventoryEntry[];
 }
 
@@ -148,6 +163,8 @@ export interface StatsView {
 	character: string;
 	server: string;
 	captured_at: string;
+	loadout: string | null;
+	classes: string[];
 	stats: GearStats;
 	equipped: InventoryEntry[];
 }
@@ -209,11 +226,21 @@ export interface LayoutSummary {
 	updated_at: string;
 }
 
+/** `hidden` and `bare` name ini sections, which may be windows the layout does
+ *  not position — that is how toolbars are switched off. */
+export interface LayoutStyle {
+	font_shift?: number;
+	gem?: number | null;
+	hidden?: string[];
+	bare?: string[];
+}
+
 export interface LayoutView {
 	name: string;
 	screen_w: number;
 	screen_h: number;
 	layout: Record<string, Rect>;
+	style?: LayoutStyle;
 	problems: string[];
 	updated_at: string;
 }
@@ -222,6 +249,7 @@ export interface LayoutBody {
 	screen_w: number;
 	screen_h: number;
 	layout: Record<string, Rect>;
+	style?: LayoutStyle;
 }
 
 export class ApiError extends Error {
@@ -271,19 +299,22 @@ async function authed<T>(
 	return response.status === 204 ? (null as T) : ((await response.json()) as T);
 }
 
+const loadoutQuery = (loadout?: string) =>
+	loadout ? `?loadout=${encodeURIComponent(loadout)}` : '';
+
 export const endpoints = {
 	characters: () => get<CharacterSummary[]>('/api/v1/characters'),
 	character: (server: string, name: string) =>
 		get<CharacterView>(
 			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}`
 		),
-	inventory: (server: string, name: string) =>
+	inventory: (server: string, name: string, loadout?: string) =>
 		get<InventoryView>(
-			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/inventory`
+			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/inventory${loadoutQuery(loadout)}`
 		),
-	stats: (server: string, name: string) =>
+	stats: (server: string, name: string, loadout?: string) =>
 		get<StatsView>(
-			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/stats`
+			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/stats${loadoutQuery(loadout)}`
 		),
 	events: (server: string, name: string, limit: number, before?: string) => {
 		const query = new URLSearchParams({ limit: String(limit) });
@@ -318,8 +349,43 @@ export const endpoints = {
 			token
 		),
 	deleteLayout: (token: string, name: string) =>
-		authed<null>('DELETE', `/api/v1/layouts/${encodeURIComponent(name)}`, token)
+		authed<null>('DELETE', `/api/v1/layouts/${encodeURIComponent(name)}`, token),
+	devices: (token: string) => authed<DeviceSummary[]>('GET', '/api/v1/devices', token),
+	deviceSessions: (token: string, device: string) =>
+		authed<SessionSummary[]>(
+			'GET',
+			`/api/v1/devices/${encodeURIComponent(device)}/sessions`,
+			token
+		),
+	deviceSession: (token: string, device: string, session: string) =>
+		authed<SessionLog>(
+			'GET',
+			`/api/v1/devices/${encodeURIComponent(device)}/sessions/${encodeURIComponent(session)}`,
+			token
+		)
 };
+
+export interface DeviceSummary {
+	device: string;
+	sessions: number;
+	lines: number;
+	last_at: string;
+}
+
+export interface SessionSummary {
+	session: string;
+	lines: number;
+	dropped: number;
+	started_at: string;
+	last_at: string;
+}
+
+export interface SessionLog {
+	device: string;
+	session: string;
+	dropped: number;
+	lines: string[];
+}
 
 export const bundleUrl = (name: string, skin: string) => {
 	const query = skin ? `?skin=${encodeURIComponent(skin)}` : '';
