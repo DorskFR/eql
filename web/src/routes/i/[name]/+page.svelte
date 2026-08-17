@@ -1,20 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import {
-		AutoGrid,
-		Badge,
-		Button,
-		Card,
-		Cluster,
-		EmptyState,
-		Heading,
-		Metric,
-		Spinner,
-		Stack,
-		Text,
-		Timestamp
-	} from '@dorsk/tsumikit';
-	import { ATTRIBUTES, damageDelay, flags, iconUrl, pairs, ratio, RESISTS } from '$lib/items';
+	import { Timestamp } from '@dorsk/tsumikit';
+	import type { ItemStats } from '$lib/api';
+	import { ATTRIBUTES, flags, iconUrl, ratio, RESISTS } from '$lib/items';
 	import { useItem } from '$lib/queries';
 
 	const key = $derived(page.params.name ?? '');
@@ -23,186 +11,245 @@
 	const stats = $derived(item.data?.stats);
 	const icon = $derived(iconUrl(stats));
 	let brokenIcon = $state('');
-	const attributes = $derived(stats ? pairs(stats, ATTRIBUTES) : []);
-	const resists = $derived(stats ? pairs(stats, RESISTS) : []);
+
+	const title = $derived(
+		item.data ? `${item.data.name}${item.data.upgrade ? ` +${item.data.upgrade}` : ''}` : key
+	);
+
+	const signed = (value: number) => (value > 0 ? `+${value}` : String(value));
+
+	const statLine = (s: ItemStats, keys: readonly (readonly [keyof ItemStats, string])[]) =>
+		keys
+			.map(([k, label]) => ({ label, value: s[k] as number | null }))
+			.filter((pair) => pair.value)
+			.map((pair) => `${pair.label}: ${signed(pair.value as number)}`)
+			.join('  ');
+
+	const vitalsLine = (s: ItemStats) =>
+		statLine(s, [
+			['hp', 'HP'],
+			['mana', 'MANA'],
+			['endurance', 'END'],
+			['hp_regen', 'HP REGEN'],
+			['mana_regen', 'MANA REGEN']
+		] as const);
+
+	const resistLine = (s: ItemStats) =>
+		statLine(s, RESISTS.map(([k, label]) => [k, `SV ${label.toUpperCase()}`] as const));
 </script>
 
-<Stack gap="var(--sp-4)">
-	<Cluster justify="space-between">
-		<Cluster gap="var(--sp-3)">
-			<Button href="/" variant="ghost" size="sm">Back</Button>
-			{#if icon && brokenIcon !== icon}
-				<img
-					class="item-icon"
-					src={icon}
-					alt=""
-					width="40"
-					height="40"
-					onerror={() => (brokenIcon = icon)}
-				/>
-			{/if}
-			<Heading level={2}>{item.data?.name ?? key}</Heading>
-		</Cluster>
-		{#if item.data}
-			<Badge tone="neutral">
-				scraped <Timestamp value={item.data.scraped_at} mode="relative" details={false} />
-			</Badge>
-		{/if}
-	</Cluster>
+<div class="eq-window eq-inspect">
+	<a class="eq-back" href="/">« Back</a>
 
 	{#if item.isPending}
-		<Card>
-			<Cluster gap="var(--sp-2)">
-				<Spinner />
-				<Text tone="muted">Loading item…</Text>
-			</Cluster>
-		</Card>
+		<div class="eq-panel eq-faint">Consulting the item database…</div>
 	{:else if item.isError || !stats}
-		<EmptyState
-			title="Item not in the database"
-			description="Nothing scraped from eqlwiki matches this name yet."
-			icon="search"
-			tone="warn"
-		/>
+		<div class="eq-panel">
+			<div class="eq-title">{decodeURIComponent(key)}</div>
+			<div class="eq-faint">Item not in the database — nothing scraped from eqlwiki matches this name yet.</div>
+		</div>
 	{:else}
-		<Cluster gap="var(--sp-2)">
-			{#each flags(stats) as flag (flag)}
-				<Badge tone="warn" uppercase size="sm">{flag}</Badge>
-			{/each}
-			{#each stats.slots as slot (slot)}
-				<Badge tone="info" size="sm">{slot}</Badge>
-			{/each}
-			{#if stats.item_type}
-				<Badge tone="info" size="sm">{stats.item_type}</Badge>
-			{/if}
-			{#if stats.required_level}
-				<Badge tone="neutral" size="sm">Required level {stats.required_level}</Badge>
-			{/if}
-		</Cluster>
+		<div class="eq-panel">
+			<div class="eq-head">
+				{#if icon && brokenIcon !== icon}
+					<img
+						class="eq-icon"
+						src={icon}
+						alt=""
+						width="40"
+						height="40"
+						onerror={() => (brokenIcon = icon)}
+					/>
+				{/if}
+				<span class="eq-title">{title}</span>
+			</div>
 
-		<AutoGrid min="10rem">
+			{#if flags(stats).length}
+				<div class="eq-line eq-flags">{flags(stats).map((f) => f.toUpperCase()).join('  ')}</div>
+			{/if}
+			{#if stats.slots.length}
+				<div class="eq-line">Slot: {stats.slots.join(' ')}</div>
+			{/if}
+			{#if stats.item_type}
+				<div class="eq-line">Skill: {stats.item_type}{stats.delay ? `  Atk Delay: ${stats.delay}` : ''}</div>
+			{/if}
+			{#if stats.damage}
+				<div class="eq-line">DMG: {stats.damage}{ratio(stats) ? `  (ratio ${ratio(stats)})` : ''}</div>
+			{/if}
+			{#if stats.backstab}
+				<div class="eq-line">Backstab DMG: {stats.backstab}</div>
+			{/if}
+			{#if stats.range}
+				<div class="eq-line">Range: {stats.range}</div>
+			{/if}
 			{#if stats.ac}
-				<Metric label="AC" value={stats.ac} icon="lock" tone="info" />
+				<div class="eq-line">AC: {stats.ac}</div>
 			{/if}
-			{#if stats.hp}
-				<Metric label="HP" value={stats.hp} icon="heart" tone="ok" />
+			{#if statLine(stats, ATTRIBUTES)}
+				<div class="eq-line">{statLine(stats, ATTRIBUTES)}</div>
 			{/if}
-			{#if stats.mana}
-				<Metric label="Mana" value={stats.mana} icon="star" tone="info" />
+			{#if vitalsLine(stats)}
+				<div class="eq-line">{vitalsLine(stats)}</div>
 			{/if}
-			{#if stats.endurance}
-				<Metric label="Endurance" value={stats.endurance} icon="live" />
-			{/if}
-			{#if stats.damage || stats.delay}
-				<Metric label="Dmg / Delay" value={damageDelay(stats)} sub={`ratio ${ratio(stats)}`} />
+			{#if resistLine(stats)}
+				<div class="eq-line">{resistLine(stats)}</div>
 			{/if}
 			{#if stats.haste}
-				<Metric label="Haste" value={stats.haste} unit="%" icon="clock" />
-			{/if}
-			{#if stats.weight !== null}
-				<Metric label="Weight" value={stats.weight} sub={stats.size ?? undefined} />
-			{/if}
-			{#if stats.capacity}
-				<Metric
-					label="Capacity"
-					value={stats.capacity}
-					sub={stats.size_capacity ?? undefined}
-					icon="archive"
-				/>
+				<div class="eq-line">Haste: +{stats.haste}%</div>
 			{/if}
 			{#if stats.weight_reduction}
-				<Metric label="Weight reduction" value={stats.weight_reduction} unit="%" />
+				<div class="eq-line">Weight Reduction: {stats.weight_reduction}%</div>
 			{/if}
-			{#if stats.hp_regen}
-				<Metric label="HP regen" value={stats.hp_regen} tone="ok" />
+			{#if stats.capacity}
+				<div class="eq-line">
+					Capacity: {stats.capacity}{stats.size_capacity ? `  Size Capacity: ${stats.size_capacity}` : ''}
+				</div>
 			{/if}
-			{#if stats.mana_regen}
-				<Metric label="Mana regen" value={stats.mana_regen} tone="info" />
+			{#if stats.charges}
+				<div class="eq-line">Charges: {stats.charges}</div>
 			{/if}
-		</AutoGrid>
+			{#if stats.weight !== null || stats.size}
+				<div class="eq-line">
+					{stats.weight !== null ? `WT: ${stats.weight}` : ''}{stats.size ? `  Size: ${stats.size}` : ''}
+				</div>
+			{/if}
+			<div class="eq-line">Class: {stats.classes.length ? stats.classes.join(' ') : 'ALL'}</div>
+			<div class="eq-line">Race: {stats.races.length ? stats.races.join(' ') : 'ALL'}</div>
+			{#if stats.deity}
+				<div class="eq-line">Deity: {stats.deity}</div>
+			{/if}
 
-		{#if attributes.length}
-			<Card>
-				<Stack gap="var(--sp-2)">
-					<Heading level={3} size="sm">Attributes</Heading>
-					<Cluster gap="var(--sp-2)">
-						{#each attributes as attribute (attribute.label)}
-							<Badge tone="ok" mono>{attribute.label} +{attribute.value}</Badge>
-						{/each}
-					</Cluster>
-				</Stack>
-			</Card>
-		{/if}
+			{#each stats.effects as effect (effect.name)}
+				<div class="eq-line eq-effect">
+					{effect.kind === 'worn' ? 'Worn Effect' : 'Effect'}: {effect.name}
+					{#if effect.casting_time}(Casting Time: {effect.casting_time}){/if}
+					{#if effect.level}at Level {effect.level}{/if}
+					{#if effect.cooldown_seconds}— cooldown {effect.cooldown_seconds}s{/if}
+					{#if effect.restriction}<span class="eq-faint"> {effect.restriction}</span>{/if}
+				</div>
+			{/each}
+			{#if stats.focus_effect}
+				<div class="eq-line eq-effect">Focus Effect: {stats.focus_effect}</div>
+			{/if}
+			{#if stats.required_level}
+				<div class="eq-line">Required level of {stats.required_level}.</div>
+			{/if}
 
-		{#if resists.length}
-			<Card>
-				<Stack gap="var(--sp-2)">
-					<Heading level={3} size="sm">Resists</Heading>
-					<Cluster gap="var(--sp-2)">
-						{#each resists as resist (resist.label)}
-							<Badge tone="info" mono>{resist.label} +{resist.value}</Badge>
-						{/each}
-					</Cluster>
-				</Stack>
-			</Card>
-		{/if}
-
-		{#if stats.effects.length}
-			<Card>
-				<Stack gap="var(--sp-2)">
-					<Heading level={3} size="sm">Effects</Heading>
-					{#each stats.effects as effect (effect.name)}
-						<Cluster gap="var(--sp-2)">
-							<Badge tone="info" uppercase size="sm">{effect.kind}</Badge>
-							<Text weight="medium">{effect.name}</Text>
-							{#if effect.restriction}
-								<Text tone="muted" variant="caption">{effect.restriction}</Text>
-							{/if}
-							{#if effect.casting_time}
-								<Text tone="muted" variant="caption">cast {effect.casting_time}</Text>
-							{/if}
-							{#if effect.level}
-								<Text tone="muted" variant="caption">level {effect.level}</Text>
-							{/if}
-							{#if effect.cooldown_seconds}
-								<Text tone="muted" variant="caption">cooldown {effect.cooldown_seconds}s</Text>
-							{/if}
-						</Cluster>
-					{/each}
-				</Stack>
-			</Card>
-		{/if}
-
-		<Card>
-			<Stack gap="var(--sp-2)">
-				<Heading level={3} size="sm">Restrictions</Heading>
-				<Cluster gap="var(--sp-2)">
-					<Text tone="muted" variant="caption">Classes</Text>
-					{#each stats.classes.length ? stats.classes : ['—'] as klass (klass)}
-						<Badge size="sm">{klass}</Badge>
-					{/each}
-				</Cluster>
-				<Cluster gap="var(--sp-2)">
-					<Text tone="muted" variant="caption">Races</Text>
-					{#each stats.races.length ? stats.races : ['—'] as race (race)}
-						<Badge size="sm">{race}</Badge>
-					{/each}
-				</Cluster>
-				{#if stats.deity}
-					<Cluster gap="var(--sp-2)">
-						<Text tone="muted" variant="caption">Deity</Text>
-						<Badge size="sm">{stats.deity}</Badge>
-					</Cluster>
+			<div class="eq-foot">
+				{#if item.data?.upgrade}
+					<span>merge tier +{item.data.upgrade} applied</span>
 				{/if}
-			</Stack>
-		</Card>
+				<span>
+					scraped <Timestamp value={item.data?.scraped_at ?? ''} mode="relative" details={false} />
+				</span>
+			</div>
+		</div>
 	{/if}
-</Stack>
+</div>
 
 <style>
-	.item-icon {
-		width: 2.5rem;
-		height: 2.5rem;
+	.eq-window {
+		--eq-gold: #96825a;
+		--eq-gold-bright: #c9b37a;
+		--eq-text: #d8cfae;
+		color: var(--eq-text);
+		font-family: Georgia, 'Times New Roman', serif;
+		background:
+			radial-gradient(ellipse 80% 50% at 20% 10%, rgba(90, 90, 100, 0.25), transparent 60%),
+			radial-gradient(ellipse 60% 40% at 80% 80%, rgba(70, 70, 85, 0.2), transparent 60%),
+			repeating-linear-gradient(
+				115deg,
+				#232326 0px,
+				#1c1c1f 3px,
+				#232327 7px,
+				#18181b 11px,
+				#212124 16px
+			);
+		border: 2px solid #3a3a3e;
+		border-top-color: #55555a;
+		border-left-color: #4a4a4f;
+		outline: 1px solid #0c0c0e;
+		box-shadow:
+			inset 0 0 0 1px #0c0c0e,
+			0 4px 18px rgba(0, 0, 0, 0.6);
+		border-radius: 4px;
+		padding: var(--sp-3, 0.75rem);
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-3, 0.75rem);
+	}
+
+	.eq-inspect {
+		max-width: 34rem;
+		margin: 0 auto;
+	}
+
+	.eq-back {
+		color: var(--eq-gold-bright);
+		font-size: 0.8rem;
+		text-decoration: none;
+		align-self: flex-start;
+	}
+
+	.eq-back:hover {
+		text-decoration: underline;
+	}
+
+	.eq-panel {
+		background: #131315;
+		border: 1px solid var(--eq-gold);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.8);
+		padding: 0.7rem 0.85rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		font-size: 0.85rem;
+	}
+
+	.eq-head {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.3rem;
+	}
+
+	.eq-title {
+		color: var(--eq-gold-bright);
+		font-size: 1.05rem;
+		text-shadow: 0 1px 2px #000;
+	}
+
+	.eq-icon {
+		width: 40px;
+		height: 40px;
 		image-rendering: pixelated;
+	}
+
+	.eq-line {
+		line-height: 1.35;
+	}
+
+	.eq-flags {
+		letter-spacing: 0.04em;
+	}
+
+	.eq-effect {
+		color: var(--eq-gold-bright);
+	}
+
+	.eq-faint {
+		color: #8a8470;
+		font-size: 0.75rem;
+	}
+
+	.eq-foot {
+		margin-top: 0.5rem;
+		padding-top: 0.4rem;
+		border-top: 1px solid rgba(150, 130, 90, 0.35);
+		display: flex;
+		justify-content: space-between;
+		gap: 0.5rem;
+		color: #8a8470;
+		font-size: 0.72rem;
 	}
 </style>

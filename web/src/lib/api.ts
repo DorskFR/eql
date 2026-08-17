@@ -63,6 +63,12 @@ export interface ItemRecord {
 	name: string;
 	stats: ItemStats;
 	scraped_at: string;
+	upgrade?: number;
+}
+
+export interface BisSlot {
+	slot: string;
+	candidates: ItemRecord[];
 }
 
 export interface InventoryEntry {
@@ -345,6 +351,10 @@ export const endpoints = {
 	harvest: (server: string, name: string, kind: HarvestKind) =>
 		get<HarvestDoc>(
 			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/harvest/${kind}`
+		),
+	bis: (server: string, name: string, loadout?: string) =>
+		get<BisSlot[]>(
+			`/api/v1/characters/${encodeURIComponent(server)}/${encodeURIComponent(name)}/bis${loadoutQuery(loadout)}`
 		),
 	itemSearch: (query: string) =>
 		get<ItemRecord[]>(`/api/v1/items?q=${encodeURIComponent(query)}`),

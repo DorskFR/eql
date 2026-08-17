@@ -37,11 +37,15 @@ export function filled<T extends InventoryEntry>(entries: T[]): T[] {
 }
 
 export const SLOT_ROWS: string[][] = [
-	['Charm', 'Ear', 'Head', 'Face', 'Ear'],
+	['Focus', 'Ear', 'Head', 'Face', 'Ear'],
 	['Neck', 'Shoulders', 'Arms', 'Back', 'Wrist', 'Wrist'],
 	['Range', 'Hands', 'Primary', 'Secondary', 'Fingers', 'Fingers'],
-	['Chest', 'Legs', 'Feet', 'Waist', 'Ammo']
+	['Chest', 'Legs', 'Feet', 'Waist', 'Extra', 'Ammo']
 ];
+
+/** EQL's two custom sockets arrive as two `Any Slot` rows; the dump lists the
+ *  first (Focus) at the top and the second (Extra) just before Ammo. */
+const ANY_SLOT_LABELS = ['Focus', 'Extra'];
 
 export interface PaperdollSlot<T extends InventoryEntry> {
 	key: string;
@@ -53,8 +57,12 @@ const baseLocation = (location: string) => location.replace(/ ?\d+$/, '');
 
 export function paperdoll<T extends InventoryEntry>(equipped: T[]): PaperdollSlot<T>[][] {
 	const pools = new Map<string, T[]>();
+	const anySlots: T[] = [];
 	for (const entry of equipped) {
-		if (entry.location === 'Any Slot') continue;
+		if (entry.location === 'Any Slot') {
+			anySlots.push(entry);
+			continue;
+		}
 		const base = baseLocation(entry.location);
 		const pool = pools.get(base) ?? [];
 		pool.push(entry);
@@ -62,7 +70,8 @@ export function paperdoll<T extends InventoryEntry>(equipped: T[]): PaperdollSlo
 	}
 	return SLOT_ROWS.map((row, rowIndex) =>
 		row.map((label, colIndex) => {
-			const entry = pools.get(label)?.shift() ?? null;
+			const anyIndex = ANY_SLOT_LABELS.indexOf(label);
+			const entry = (anyIndex >= 0 ? anySlots[anyIndex] : pools.get(label)?.shift()) ?? null;
 			return {
 				key: `${rowIndex}-${colIndex}`,
 				label,

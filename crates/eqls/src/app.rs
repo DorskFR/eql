@@ -1,4 +1,5 @@
 use crate::{
+    bis,
     icons::{self, IconError},
     itemdump::{self, DumpIcon},
     skin::{self, SkinError},
@@ -91,6 +92,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             "/api/v1/characters/{server}/{name}/stats",
             get(character_stats),
         )
+        .route("/api/v1/characters/{server}/{name}/bis", get(character_bis))
         .route(
             "/api/v1/characters/{server}/{name}/harvest/{kind}",
             get(get_harvest),
@@ -924,6 +926,8 @@ struct ItemRecord {
     scraped_at: OffsetDateTime,
     #[serde(skip)]
     from_dump: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upgrade: Option<u32>,
 }
 
 fn item_from_row(row: &sqlx::postgres::PgRow) -> Result<ItemRecord, sqlx::Error> {
@@ -935,6 +939,7 @@ fn item_from_row(row: &sqlx::postgres::PgRow) -> Result<ItemRecord, sqlx::Error>
         stats: stats.0,
         scraped_at: row.try_get("scraped_at")?,
         from_dump: false,
+        upgrade: None,
     })
 }
 
@@ -953,6 +958,7 @@ fn item_from_dump(found: &DumpIcon) -> ItemRecord {
         stats: serde_json::to_value(stats).expect("item stats serialise to json"),
         scraped_at: OffsetDateTime::UNIX_EPOCH,
         from_dump: true,
+        upgrade: None,
     }
 }
 
@@ -986,6 +992,7 @@ struct Snapshot {
     loadout: Option<String>,
     classes: Vec<String>,
     race: Option<String>,
+    level: Option<i64>,
 }
 
 async fn latest_snapshot(
@@ -995,7 +1002,8 @@ async fn latest_snapshot(
     loadout: Option<&str>,
 ) -> Result<Snapshot, AppError> {
     let row = sqlx::query(
-        "select c.name, c.server, c.race, s.captured_at, s.entries, l.class_key, l.classes \
+        "select c.name, c.server, c.race, coalesce(l.level, c.level) as level, \
+                s.captured_at, s.entries, l.class_key, l.classes \
          from characters c \
          join inventory_snapshots s on s.character_id = c.id \
          left join character_loadouts l on l.id = s.loadout_id \
@@ -1022,6 +1030,7 @@ async fn latest_snapshot(
             .try_get::<Option<Vec<String>>, _>("classes")?
             .unwrap_or_default(),
         race: row.try_get("race")?,
+        level: row.try_get::<Option<i32>, _>("level")?.map(i64::from),
     })
 }
 
@@ -1271,9 +1280,84 @@ async fn get_item(
     .bind(&key)
     .bind(numeric)
     .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::NotFound)?;
-    Ok(Json(item_from_row(&row)?))
+    .await?;
+    if let Some(row) = row {
+        return Ok(Json(item_from_row(&row)?));
+    }
+    for (candidate, tier) in name_candidates(&key).into_iter().skip(1) {
+        let row = sqlx::query(
+            "select id, game_id, name, stats, scraped_at from items \
+             where lower(name) = $1 limit 1",
+        )
+        .bind(&candidate)
+        .fetch_optional(&state.pool)
+        .await?;
+        if let Some(row) = row {
+            let mut item = item_from_row(&row)?;
+            if let Some(tier) = tier {
+                crate::upgrade::apply_upgrade(&mut item.stats, tier);
+                item.upgrade = Some(tier);
+            }
+            return Ok(Json(item));
+        }
+    }
+    Err(AppError::NotFound)
+}
+
+#[derive(Serialize)]
+struct BisSlot {
+    slot: String,
+    candidates: Vec<ItemRecord>,
+}
+
+const BIS_LIMIT: usize = 6;
+
+async fn character_bis(
+    State(state): State<AppState>,
+    Path((server, name)): Path<(String, String)>,
+    Query(query): Query<LoadoutQuery>,
+) -> Result<Json<Vec<BisSlot>>, AppError> {
+    let snapshot = latest_snapshot(&state.pool, &server, &name, query.key().as_deref()).await?;
+    let rows = sqlx::query(
+        "select id, game_id, name, stats, scraped_at from items \
+         where jsonb_array_length(stats->'slots') > 0",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let items: Vec<(ItemRecord, ItemStats)> = rows
+        .iter()
+        .filter_map(|row| {
+            let record = item_from_row(row).ok()?;
+            let stats: ItemStats = serde_json::from_value(record.stats.clone()).ok()?;
+            Some((record, stats))
+        })
+        .filter(|(_, stats)| {
+            !stats.temporary
+                && (snapshot.classes.is_empty()
+                    || bis::usable_by(&stats.classes, &snapshot.classes))
+                && bis::level_ok(stats.required_level, snapshot.level)
+        })
+        .collect();
+    let slots = bis::SLOTS
+        .iter()
+        .map(|(label, tokens)| {
+            let mut matching: Vec<&(ItemRecord, ItemStats)> = items
+                .iter()
+                .filter(|(_, stats)| bis::fits_slot(&stats.slots, tokens))
+                .collect();
+            matching
+                .sort_by_key(|(_, stats)| std::cmp::Reverse(bis::rank(stats, *label == "Primary")));
+            BisSlot {
+                slot: (*label).to_string(),
+                candidates: matching
+                    .into_iter()
+                    .take(BIS_LIMIT)
+                    .map(|(record, _)| record.clone())
+                    .collect(),
+            }
+        })
+        .collect();
+    Ok(Json(slots))
 }
 
 #[derive(Serialize)]
@@ -3050,6 +3134,7 @@ mod tests {
             stats: serde_json::json!({}),
             scraped_at: OffsetDateTime::UNIX_EPOCH,
             from_dump: false,
+            upgrade: None,
         }
     }
 
@@ -3136,8 +3221,7 @@ mod tests {
         assert_eq!(entries[1]["item"]["name"], "Mithril Earring");
         assert_eq!(entries[1]["upgrade"], 2);
         assert_eq!(
-            entries[1]["item"]["stats"]["ac"],
-            4,
+            entries[1]["item"]["stats"]["ac"], 4,
             "minimum +1 per tier beats the 10%"
         );
         assert_eq!(entries[1]["item"]["stats"]["hp"], 18);
@@ -3163,6 +3247,98 @@ mod tests {
             stats.get("base").is_none(),
             "no /who yet, so race is unknown and base attributes are absent"
         );
+    }
+
+    #[tokio::test]
+    async fn bis_ranks_usable_items_and_item_lookup_scales_merge_tiers() {
+        let Some((app, pool)) = live_app().await else {
+            return;
+        };
+        let seed = |name: &str, slots: &[&str], ac: i64| {
+            serde_json::to_value(ItemStats {
+                name: name.to_string(),
+                slots: slots.iter().map(|s| (*s).to_string()).collect(),
+                ac: Some(ac),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        for (name, slots, ac) in [
+            ("Iron Shield", &["SECONDARY"] as &[&str], 10),
+            ("Tower of Power", &["SECONDARY"], 50),
+            ("Fancy Hat", &["HEAD"], 7),
+        ] {
+            sqlx::query(
+                "insert into items (name, stats, wikitext) values ($1, $2, '') \
+                 on conflict (name) do update set stats = excluded.stats",
+            )
+            .bind(name)
+            .bind(SqlJson(seed(name, slots, ac)))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let upload = r#"{"character":"Bisk","server":"erudin","entries":[
+            {"location":"Any Slot","name":"Iron Shield","id":1,"count":1,"slots":0},
+            {"location":"Any Slot","name":"Iron Shield","id":1,"count":1,"slots":0}]}"#;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/inventory")
+            .header("authorization", "Bearer s3cret")
+            .header("content-type", "application/json")
+            .body(Body::from(upload))
+            .unwrap();
+        assert_eq!(json_of(&app, request).await.0, StatusCode::CREATED);
+
+        let (status, bis) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Bisk/bis")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let slots = bis.as_array().unwrap();
+        assert_eq!(slots.len(), bis::SLOTS.len());
+        let of = |label: &str| {
+            slots
+                .iter()
+                .find(|slot| slot["slot"] == label)
+                .unwrap_or_else(|| panic!("{label} slot present"))["candidates"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        let secondary: Vec<_> = of("Secondary")
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(secondary[..2], ["Tower of Power", "Iron Shield"]);
+        let focus: Vec<_> = of("Focus")
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            focus.contains(&"Tower of Power".to_string())
+                && focus.contains(&"Fancy Hat".to_string()),
+            "Any Slot sockets consider every equippable item: {focus:?}"
+        );
+        assert_eq!(of("Head")[0]["name"], "Fancy Hat");
+
+        let (status, item) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/items/Iron%20Shield%20+2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(item["name"], "Iron Shield");
+        assert_eq!(item["upgrade"], 2);
+        assert_eq!(item["stats"]["ac"], 12);
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 mod app;
+mod bis;
 mod icons;
 mod itemdump;
 mod scrape;
