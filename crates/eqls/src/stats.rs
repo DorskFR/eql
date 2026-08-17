@@ -11,6 +11,87 @@ pub const CLASSES: [&str; 16] = [
 const LOADOUT_SIZE: usize = 3;
 const CONTAINER_PREFIXES: [&str; 3] = ["General", "Bank", "SharedBank"];
 
+/// STR STA AGI DEX WIS INT CHA, from eqlwiki "Statistics".
+const RACE_BASE: [(&str, [i64; 7]); 15] = [
+    ("Barbarian", [103, 95, 82, 70, 70, 60, 55]),
+    ("Dark Elf", [60, 65, 90, 75, 83, 99, 60]),
+    ("Dwarf", [90, 90, 70, 90, 83, 60, 45]),
+    ("Erudite", [60, 70, 70, 70, 83, 107, 70]),
+    ("Froglok", [70, 80, 100, 100, 75, 75, 50]),
+    ("Gnome", [60, 70, 85, 85, 67, 98, 60]),
+    ("Half-Elf", [70, 70, 90, 85, 60, 75, 75]),
+    ("Halfling", [70, 75, 95, 90, 80, 67, 50]),
+    ("High Elf", [55, 65, 85, 70, 95, 92, 80]),
+    ("Human", [75, 75, 75, 75, 75, 75, 75]),
+    ("Iksar", [70, 70, 90, 85, 80, 75, 55]),
+    ("Kerra", [90, 75, 90, 70, 70, 65, 65]),
+    ("Ogre", [130, 127, 70, 70, 67, 60, 37]),
+    ("Troll", [108, 114, 83, 75, 60, 52, 40]),
+    ("Wood Elf", [65, 65, 95, 80, 80, 75, 75]),
+];
+
+const CLASS_MOD: [(&str, [i64; 7]); 16] = [
+    ("BRD", [5, 0, 0, 10, 0, 0, 15]),
+    ("BST", [0, 10, 5, 0, 10, 0, 5]),
+    ("BER", [15, 5, 0, 10, 0, 0, 0]),
+    ("CLR", [5, 10, 0, 0, 15, 0, 0]),
+    ("DRU", [0, 15, 0, 0, 15, 0, 0]),
+    ("ENC", [0, 0, 0, 0, 0, 15, 15]),
+    ("MAG", [0, 15, 0, 0, 0, 15, 0]),
+    ("MNK", [5, 5, 10, 10, 0, 0, 0]),
+    ("NEC", [0, 0, 0, 15, 0, 15, 0]),
+    ("PAL", [10, 5, 0, 0, 5, 0, 10]),
+    ("RNG", [5, 10, 10, 0, 5, 0, 0]),
+    ("ROG", [0, 0, 15, 15, 0, 0, 0]),
+    ("SHD", [10, 5, 0, 0, 0, 10, 5]),
+    ("SHM", [0, 10, 0, 0, 15, 0, 5]),
+    ("WAR", [10, 15, 5, 0, 0, 0, 0]),
+    ("WIZ", [0, 15, 0, 0, 0, 15, 0]),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BaseAttributes {
+    #[serde(rename = "str")]
+    pub strength: i64,
+    pub sta: i64,
+    pub agi: i64,
+    pub dex: i64,
+    pub wis: i64,
+    #[serde(rename = "int")]
+    pub intelligence: i64,
+    pub cha: i64,
+}
+
+/// Race base plus the primary (first) class's creation modifier. Points a
+/// player allocated at creation are invisible to the dumps, so in-game values
+/// can sit a little above these.
+pub fn base_attributes(race: &str, primary_class: Option<&str>) -> Option<BaseAttributes> {
+    let mut values = RACE_BASE
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(race))
+        .map(|(_, values)| *values)?;
+    if let Some(class) = primary_class {
+        if let Some((_, modifier)) = CLASS_MOD
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(class))
+        {
+            for (value, extra) in values.iter_mut().zip(modifier) {
+                *value += extra;
+            }
+        }
+    }
+    let [strength, sta, agi, dex, wis, intelligence, cha] = values;
+    Some(BaseAttributes {
+        strength,
+        sta,
+        agi,
+        dex,
+        wis,
+        intelligence,
+        cha,
+    })
+}
+
 pub fn is_equipped_location(location: &str) -> bool {
     !location.contains("-Slot")
         && !CONTAINER_PREFIXES
@@ -442,6 +523,27 @@ mod tests {
         assert_eq!(gear.ac, 10);
         assert_eq!(gear.weight, 2.0);
         assert_eq!(gear.equipped_count, 2);
+    }
+
+    #[test]
+    fn base_attributes_add_the_primary_class_modifier() {
+        let base = base_attributes("Dark Elf", Some("SHD")).unwrap();
+        assert_eq!(
+            base,
+            BaseAttributes {
+                strength: 70,
+                sta: 70,
+                agi: 90,
+                dex: 75,
+                wis: 83,
+                intelligence: 109,
+                cha: 65,
+            }
+        );
+        let plain = base_attributes("dark elf", None).unwrap();
+        assert_eq!(plain.strength, 60);
+        assert_eq!(plain.intelligence, 99);
+        assert!(base_attributes("Vulcan", Some("SHD")).is_none());
     }
 
     #[test]

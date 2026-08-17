@@ -50,6 +50,7 @@
 	import { bags, filled, groupEntries, paperdoll } from '$lib/inventory';
 	import {
 		ATTRIBUTES,
+		attributeTotals,
 		damageDelay,
 		equippedTotals,
 		gearPairs,
@@ -270,7 +271,9 @@
 	];
 
 	const stats = $derived(gear.data?.stats);
+	const base = $derived(gear.data?.base);
 	const attributes = $derived(stats ? gearPairs(stats, ATTRIBUTES) : []);
+	const totalAttributes = $derived(base && stats ? attributeTotals(base, stats) : []);
 	const resists = $derived(stats ? gearPairs(stats, RESISTS) : []);
 	const restricted = $derived(
 		(stats?.item_classes.filter((item) => item.classes.length) ?? []).map((item, index) => ({
@@ -431,15 +434,34 @@
 					</div>
 
 					<div class="eq-panel">
-						<div class="eq-panel-title">Attributes · from gear</div>
-						<div class="eq-vitals">
-							{#each attributes as attr (attr.label)}
-								<div class="eq-row">
-									<span>{attr.label}</span>
-									<b class={attr.value > 0 ? 'eq-green' : 'eq-dim'}>{signed(attr.value)}</b>
-								</div>
-							{/each}
-						</div>
+						{#if totalAttributes.length}
+							<div class="eq-panel-title">Attributes</div>
+							<div class="eq-vitals">
+								{#each totalAttributes as attr (attr.label)}
+									<div class="eq-row">
+										<span>{attr.label}</span>
+										<span>
+											{#if attr.gear}<span class="eq-gearpart eq-green">{signed(attr.gear)}</span>{/if}
+											<b>{attr.total}</b>
+										</span>
+									</div>
+								{/each}
+							</div>
+							<div class="eq-faint">
+								Race and class base plus gear — points allocated at character creation are not in
+								the dumps.
+							</div>
+						{:else}
+							<div class="eq-panel-title">Attributes · from gear</div>
+							<div class="eq-vitals">
+								{#each attributes as attr (attr.label)}
+									<div class="eq-row">
+										<span>{attr.label}</span>
+										<b class={attr.value > 0 ? 'eq-green' : 'eq-dim'}>{signed(attr.value)}</b>
+									</div>
+								{/each}
+							</div>
+						{/if}
 					</div>
 
 					<div class="eq-panel">
@@ -610,7 +632,8 @@
 	{:else}
 		<Stack gap="var(--sp-3)">
 			<Text variant="caption" tone="faint">
-				From gear only — race, class and level base stats are not included.
+				Gear values include merge (+N) tier bonuses. HP, mana and endurance are from gear only —
+				level-based vitals are not derivable from the dumps.
 				{stats.known_items} of {stats.equipped_count} equipped items are in the item database.
 			</Text>
 
@@ -1339,6 +1362,11 @@
 	}
 	.eq-dim {
 		color: #6f6a5a;
+	}
+
+	.eq-gearpart {
+		font-size: 0.7rem;
+		margin-right: 0.35rem;
 	}
 
 	.eq-grid {

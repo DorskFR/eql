@@ -1,4 +1,4 @@
-import type { GearStats, InventoryEntry, ItemStats, WeaponSummary } from './api';
+import type { BaseAttributes, GearStats, InventoryEntry, ItemStats, WeaponSummary } from './api';
 
 export function itemPath(name: string): string {
 	return `/i/${encodeURIComponent(name)}`;
@@ -83,6 +83,20 @@ export function gearPairs(
 	keys: readonly (readonly [keyof GearStats, string])[]
 ): StatRow[] {
 	return keys.map(([key, label]) => ({ label, value: stats[key] as number }));
+}
+
+export interface TotalRow {
+	label: string;
+	total: number;
+	gear: number;
+}
+
+export function attributeTotals(base: BaseAttributes, stats: GearStats): TotalRow[] {
+	return ATTRIBUTES.map(([key, label]) => ({
+		label,
+		total: base[key] + stats[key],
+		gear: stats[key]
+	}));
 }
 
 export function weaponRatio(weapon: WeaponSummary): string {

@@ -159,12 +159,24 @@ export interface GearStats {
 	item_classes: ItemClasses[];
 }
 
+export interface BaseAttributes {
+	str: number;
+	sta: number;
+	agi: number;
+	dex: number;
+	wis: number;
+	int: number;
+	cha: number;
+}
+
 export interface StatsView {
 	character: string;
 	server: string;
 	captured_at: string;
 	loadout: string | null;
 	classes: string[];
+	race: string | null;
+	base?: BaseAttributes;
 	stats: GearStats;
 	equipped: InventoryEntry[];
 }

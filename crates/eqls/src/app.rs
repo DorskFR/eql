@@ -2,7 +2,7 @@ use crate::{
     icons::{self, IconError},
     itemdump::{self, DumpIcon},
     skin::{self, SkinError},
-    stats::{derive_gear_stats, is_equipped_location, GearStats},
+    stats::{self, derive_gear_stats, is_equipped_location, GearStats},
     wiki::ItemStats,
 };
 use axum::{
@@ -985,6 +985,7 @@ struct Snapshot {
     entries: Vec<InventoryEntry>,
     loadout: Option<String>,
     classes: Vec<String>,
+    race: Option<String>,
 }
 
 async fn latest_snapshot(
@@ -994,7 +995,7 @@ async fn latest_snapshot(
     loadout: Option<&str>,
 ) -> Result<Snapshot, AppError> {
     let row = sqlx::query(
-        "select c.name, c.server, s.captured_at, s.entries, l.class_key, l.classes \
+        "select c.name, c.server, c.race, s.captured_at, s.entries, l.class_key, l.classes \
          from characters c \
          join inventory_snapshots s on s.character_id = c.id \
          left join character_loadouts l on l.id = s.loadout_id \
@@ -1020,6 +1021,7 @@ async fn latest_snapshot(
         classes: row
             .try_get::<Option<Vec<String>>, _>("classes")?
             .unwrap_or_default(),
+        race: row.try_get("race")?,
     })
 }
 
@@ -1084,7 +1086,12 @@ async fn join_items(
     let mut views: Vec<InventoryEntryView> = entries
         .into_iter()
         .map(|entry| {
-            let (item, upgrade) = resolve_item(&items, &entry.name);
+            let (mut item, upgrade) = resolve_item(&items, &entry.name);
+            if let (Some(item), Some(tier)) = (item.as_mut(), upgrade) {
+                if !item.from_dump {
+                    crate::upgrade::apply_upgrade(&mut item.stats, tier);
+                }
+            }
             InventoryEntryView {
                 item,
                 upgrade,
@@ -1174,6 +1181,9 @@ struct StatsView {
     captured_at: OffsetDateTime,
     loadout: Option<String>,
     classes: Vec<String>,
+    race: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base: Option<stats::BaseAttributes>,
     stats: GearStats,
     equipped: Vec<InventoryEntryView>,
 }
@@ -1198,12 +1208,18 @@ async fn character_stats(
         })
         .collect();
 
+    let base = snapshot.race.as_deref().and_then(|race| {
+        stats::base_attributes(race, snapshot.classes.first().map(String::as_str))
+    });
+
     Ok(Json(StatsView {
         character: snapshot.character,
         server: snapshot.server,
         captured_at: snapshot.captured_at,
         loadout: snapshot.loadout,
         classes: snapshot.classes,
+        race: snapshot.race,
+        base,
         stats: derive_gear_stats(&pairs),
         equipped: views
             .into_iter()
@@ -2374,6 +2390,11 @@ mod tests {
         .await;
         assert_eq!(gear["loadout"], "MNK/SHD/SHM");
         assert_eq!(gear["equipped"][0]["name"], "Ogre Warhammer");
+        assert_eq!(gear["race"], "Ogre");
+        assert_eq!(gear["classes"][0], "SHD", "who order, primary first");
+        assert_eq!(gear["base"]["str"], 140, "Ogre 130 + SHD 10");
+        assert_eq!(gear["base"]["int"], 70);
+        assert_eq!(gear["base"]["cha"], 42);
 
         assert_eq!(
             status_of_request(
@@ -3055,7 +3076,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upgraded_items_resolve_to_base_stats_in_inventory_and_stats() {
+    async fn upgraded_items_scale_stats_by_merge_tier() {
         let Some((app, pool)) = live_app().await else {
             return;
         };
@@ -3109,8 +3130,18 @@ mod tests {
         assert_eq!(entries[0]["name"], "Bronze Helm +5", "display name kept");
         assert_eq!(entries[0]["item"]["name"], "Bronze Helm");
         assert_eq!(entries[0]["upgrade"], 5);
+        assert_eq!(entries[0]["item"]["stats"]["ac"], 21, "14 * 1.5 = 21");
+        assert_eq!(entries[0]["item"]["stats"]["hp"], 30);
+        assert_eq!(entries[0]["item"]["stats"]["mana"], 15);
         assert_eq!(entries[1]["item"]["name"], "Mithril Earring");
         assert_eq!(entries[1]["upgrade"], 2);
+        assert_eq!(
+            entries[1]["item"]["stats"]["ac"],
+            4,
+            "minimum +1 per tier beats the 10%"
+        );
+        assert_eq!(entries[1]["item"]["stats"]["hp"], 18);
+        assert_eq!(entries[1]["item"]["stats"]["mana"], 18);
         assert!(entries[2]["item"].is_null());
         assert!(entries[2]["upgrade"].is_null());
 
@@ -3123,11 +3154,15 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(stats["stats"]["ac"], 16);
-        assert_eq!(stats["stats"]["hp"], 35);
-        assert_eq!(stats["stats"]["mana"], 25);
+        assert_eq!(stats["stats"]["ac"], 25);
+        assert_eq!(stats["stats"]["hp"], 48);
+        assert_eq!(stats["stats"]["mana"], 33);
         assert_eq!(stats["stats"]["known_items"], 2);
         assert_eq!(stats["stats"]["unknown_items"], 1);
+        assert!(
+            stats.get("base").is_none(),
+            "no /who yet, so race is unknown and base attributes are absent"
+        );
     }
 
     #[tokio::test]
