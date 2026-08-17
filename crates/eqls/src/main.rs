@@ -4,6 +4,7 @@ mod itemdump;
 mod scrape;
 mod skin;
 mod stats;
+mod upgrade;
 mod wiki;
 
 use app::AppState;
