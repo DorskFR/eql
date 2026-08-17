@@ -17,6 +17,7 @@ export const qk = {
 	harvest: (server: string, name: string, kind: HarvestKind) =>
 		['harvest', server, name, kind] as const,
 	item: (key: string) => ['item', key] as const,
+	bis: (server: string, name: string, loadout: string) => ['bis', server, name, loadout] as const,
 	layouts: ['layouts'] as const,
 	layout: (name: string) => ['layout', name] as const
 };
@@ -82,6 +83,19 @@ export const useHarvest = (server: () => string, name: () => string, kind: Harve
 		queryFn: () => endpoints.harvest(server(), name(), kind),
 		refetchInterval: REFETCH_MS,
 		retry: false
+	}));
+
+export const useBis = (
+	server: () => string,
+	name: () => string,
+	loadout: () => string,
+	enabled: () => boolean
+) =>
+	createQuery(() => ({
+		queryKey: qk.bis(server(), name(), loadout()),
+		queryFn: () => endpoints.bis(server(), name(), loadout()),
+		enabled: enabled(),
+		staleTime: 5 * 60_000
 	}));
 
 export const useItem = (key: () => string) =>

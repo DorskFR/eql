@@ -62,6 +62,7 @@
 		weaponRatio
 	} from '$lib/items';
 	import {
+		useBis,
 		useCharacter,
 		useEvents,
 		useFights,
@@ -337,6 +338,7 @@
 
 	const tabs: TabItem[] = $derived([
 		{ id: 'stats', label: 'Stats', icon: 'star' },
+		{ id: 'bis', label: 'Best in Slot', icon: 'search' },
 		{ id: 'general', label: `General (${general.length})`, icon: 'archive' },
 		{ id: 'bank', label: `Bank (${bank.length})`, icon: 'lock' },
 		{ id: 'events', label: 'Events', icon: 'clock' },
@@ -347,6 +349,40 @@
 	]);
 
 	let tab = $state('general');
+
+	const bis = useBis(
+		() => server,
+		() => name,
+		() => picked,
+		() => tab === 'bis'
+	);
+
+	const equippedBases = $derived(
+		new Set(
+			filled(groups.equipped).map((entry) =>
+				(entry.item?.name ?? shortName(entry.name)).toLowerCase()
+			)
+		)
+	);
+
+	function candidateLine(stats: ItemStats): string {
+		const parts: string[] = [];
+		if (stats.damage || stats.delay) {
+			const r = stats.damage && stats.delay ? ` (${(stats.damage / stats.delay).toFixed(2)})` : '';
+			parts.push(`${stats.damage ?? '?'}/${stats.delay ?? '?'}${r}`);
+		}
+		const pair = (label: string, value: number | null) => {
+			if (value) parts.push(`${label} ${signed(value)}`);
+		};
+		pair('AC', stats.ac);
+		pair('HP', stats.hp);
+		pair('MANA', stats.mana);
+		pair('HASTE', stats.haste);
+		for (const [key, label] of ATTRIBUTES) pair(label, stats[key] as number | null);
+		return parts.join(' · ');
+	}
+
+	const candidateClasses = (stats: ItemStats) => stats.classes.join(' ');
 </script>
 
 <div class="eq">
@@ -505,6 +541,8 @@
 					<div class="eq-tabpanel">
 						{#if id === 'stats'}
 							{@render statsPanel()}
+						{:else if id === 'bis'}
+							{@render bisPanel()}
 						{:else if id === 'events'}
 							{@render eventsPanel()}
 						{:else if id === 'fights'}
@@ -530,7 +568,7 @@
 {#snippet slotCell(label: string, entry: (InventoryEntry & { key: string }) | null)}
 	{#if entry}
 		{@const icon = iconUrl(entry.item?.stats)}
-		<a class="eq-slot eq-filled" href={entry.item ? itemPath(entry.item.name) : itemPath(entry.name)}>
+		<a class="eq-slot eq-filled" href={itemPath(entry.name)}>
 			{#if icon && !brokenIcons.has(icon)}
 				<img
 					class="eq-icon"
@@ -558,6 +596,63 @@
 		</a>
 	{:else}
 		<div class="eq-slot"><span class="eq-slot-label">{label.toUpperCase()}</span></div>
+	{/if}
+{/snippet}
+
+{#snippet bisPanel()}
+	{#if bis.isPending}
+		<div class="eq-panel eq-empty">Searching the item database…</div>
+	{:else if bis.isError}
+		<div class="eq-panel eq-empty">Best-in-slot lookup failed: {bis.error.message}</div>
+	{:else}
+		<div class="eq-faint eq-bis-note">
+			Top candidates from the eqlwiki item database for this loadout ({(inventory.data?.classes ?? []).join(
+				'/'
+			) || 'any class'}{level ? `, level ${level}` : ''}). Base values — merging adds up to +10% per
+			tier on top.
+		</div>
+		<div class="eq-bags">
+			{#each bis.data ?? [] as slot (slot.slot)}
+				<div class="eq-panel eq-bag">
+					<div class="eq-panel-title">{slot.slot}</div>
+					{#if slot.candidates.length === 0}
+						<div class="eq-faint">No usable items known for this slot.</div>
+					{:else}
+						<div class="eq-bis-list">
+							{#each slot.candidates as candidate (candidate.id)}
+								{@const icon = iconUrl(candidate.stats)}
+								{@const owned = equippedBases.has(candidate.name.toLowerCase())}
+								<a class="eq-bis-row" class:eq-bis-owned={owned} href={itemPath(candidate.name)}>
+									{#if icon && !brokenIcons.has(icon)}
+										<img
+											class="eq-icon eq-bis-icon"
+											src={icon}
+											alt=""
+											width="40"
+											height="40"
+											loading="lazy"
+											onerror={() => brokenIcons.add(icon)}
+										/>
+									{:else}
+										<span class="eq-bis-icon"></span>
+									{/if}
+									<span class="eq-bis-body">
+										<span class="eq-bis-name">
+											{candidate.name}
+											{#if owned}<span class="eq-bis-tag">equipped</span>{/if}
+										</span>
+										<span class="eq-bis-stats">{candidateLine(candidate.stats)}</span>
+										{#if candidate.stats.classes.length}
+											<span class="eq-faint">{candidateClasses(candidate.stats)}</span>
+										{/if}
+									</span>
+								</a>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/each}
+		</div>
 	{/if}
 {/snippet}
 
@@ -1498,6 +1593,66 @@
 
 	.eq-baglink:hover {
 		text-decoration: underline;
+	}
+
+	.eq-bis-note {
+		margin-bottom: 0.6rem;
+	}
+
+	.eq-bis-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.eq-bis-row {
+		display: flex;
+		gap: 0.5rem;
+		align-items: center;
+		padding: 0.25rem 0.3rem;
+		border: 1px solid transparent;
+		border-radius: 2px;
+		text-decoration: none;
+		color: var(--eq-text);
+	}
+
+	.eq-bis-row:hover {
+		border-color: var(--eq-gold-bright);
+		background: rgba(150, 130, 90, 0.08);
+	}
+
+	.eq-bis-owned {
+		background: rgba(74, 222, 74, 0.06);
+	}
+
+	.eq-bis-icon {
+		width: 28px;
+		height: 28px;
+		flex: 0 0 auto;
+	}
+
+	.eq-bis-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.05rem;
+		min-width: 0;
+	}
+
+	.eq-bis-name {
+		color: var(--eq-gold-bright);
+		font-size: 0.8rem;
+	}
+
+	.eq-bis-tag {
+		color: var(--eq-green);
+		font-size: 0.62rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		margin-left: 0.4rem;
+	}
+
+	.eq-bis-stats {
+		font-size: 0.72rem;
 	}
 
 	.eq-empty {
