@@ -12,8 +12,8 @@
 		EmptyState,
 		Heading,
 		Icon,
-		Link,
 		Metric,
+		Popover,
 		Progress,
 		Spinner,
 		Stack,
@@ -47,6 +47,7 @@
 		type FightRow,
 		projectFights
 	} from '$lib/fights';
+	import ItemDetail from '$lib/ItemDetail.svelte';
 	import { bags, filled, groupEntries, paperdoll } from '$lib/inventory';
 	import {
 		ATTRIBUTES,
@@ -55,7 +56,6 @@
 		equippedTotals,
 		gearPairs,
 		iconUrl,
-		itemPath,
 		RESISTS,
 		wikiUrl,
 		type StatRow,
@@ -569,32 +569,37 @@
 {#snippet slotCell(label: string, entry: (InventoryEntry & { key: string }) | null)}
 	{#if entry}
 		{@const icon = iconUrl(entry.item?.stats)}
-		<a class="eq-slot eq-filled" href={itemPath(entry.name)}>
-			{#if icon && !brokenIcons.has(icon)}
-				<img
-					class="eq-icon"
-					src={icon}
-					alt={shortName(entry.name)}
-					width="40"
-					height="40"
-					loading="lazy"
-					onerror={() => brokenIcons.add(icon)}
-				/>
-			{:else}
-				<span class="eq-slot-name">{shortName(entry.name)}</span>
-			{/if}
-			{#if entry.upgrade}
-				<span class="eq-upgrade">+{entry.upgrade}</span>
-			{/if}
-			<span class="eq-tooltip">
-				<b>{entry.name}</b>
-				{#each tooltipLines(entry) as line (line)}
-					<span>{line}</span>
-				{:else}
-					<span class="eq-faint">not in the item database</span>
-				{/each}
-			</span>
-		</a>
+		<Popover bare label={entry.name} gap={4}>
+			{#snippet trigger()}
+				<span class="eq-slot eq-filled">
+					{#if icon && !brokenIcons.has(icon)}
+						<img
+							class="eq-icon"
+							src={icon}
+							alt={shortName(entry.name)}
+							width="40"
+							height="40"
+							loading="lazy"
+							onerror={() => brokenIcons.add(icon)}
+						/>
+					{:else}
+						<span class="eq-slot-name">{shortName(entry.name)}</span>
+					{/if}
+					{#if entry.upgrade}
+						<span class="eq-upgrade">+{entry.upgrade}</span>
+					{/if}
+					<span class="eq-tooltip">
+						<b>{entry.name}</b>
+						{#each tooltipLines(entry) as line (line)}
+							<span>{line}</span>
+						{:else}
+							<span class="eq-faint">not in the item database</span>
+						{/each}
+					</span>
+				</span>
+			{/snippet}
+			<ItemDetail key={entry.name} pageLink />
+		</Popover>
 	{:else}
 		<div class="eq-slot"><span class="eq-slot-label">{label.toUpperCase()}</span></div>
 	{/if}
@@ -638,7 +643,12 @@
 									{/if}
 									<span class="eq-bis-body">
 										<span class="eq-bis-name">
-											<a class="eq-bis-link" href={itemPath(candidate.name)}>{candidate.name}</a>
+											<Popover bare label={candidate.name} gap={4}>
+												{#snippet trigger()}
+													<span class="eq-bis-link">{candidate.name}</span>
+												{/snippet}
+												<ItemDetail key={candidate.name} pageLink />
+											</Popover>
 											{#if owned}<span class="eq-bis-tag">equipped</span>{/if}
 											<a
 												class="eq-bis-wiki"
@@ -671,8 +681,13 @@
 					<div class="eq-panel-title">
 						{bag.label}
 						{#if bag.container}
-							· <a class="eq-baglink" href={itemPath(bag.container.item?.name ?? bag.container.name)}
-								>{bag.container.name}</a>
+							{@const containerName = bag.container.name}
+							· <Popover bare label={containerName} gap={4}>
+								{#snippet trigger()}
+									<span class="eq-baglink">{containerName}</span>
+								{/snippet}
+								<ItemDetail key={containerName} pageLink />
+							</Popover>
 						{/if}
 					</div>
 					{#if bag.contents.length}
@@ -695,7 +710,13 @@
 		<Cluster gap="var(--sp-2)">
 			<Text variant="caption" tone="muted">{label}</Text>
 			{#if weapon}
-				<Link href={itemPath(shortName(weapon.name))}>{weapon.name}</Link>
+				{@const weaponName = weapon.name}
+				<Popover bare label={weaponName} gap={4}>
+					{#snippet trigger()}
+						<span class="eq-weaponlink">{weaponName}</span>
+					{/snippet}
+					<ItemDetail key={weaponName} pageLink />
+				</Popover>
 				{#if weapon.item_type}
 					<Badge size="sm" tone="info">{weapon.item_type}</Badge>
 				{/if}
@@ -1271,7 +1292,12 @@
 {/snippet}
 
 {#snippet dropItem(row: DropRow)}
-	<Link href={itemPath(row.item)}>{row.item}</Link>
+	<Popover bare label={row.item} gap={4}>
+		{#snippet trigger()}
+			<span class="eq-droplink">{row.item}</span>
+		{/snippet}
+		<ItemDetail key={row.item} pageLink />
+	</Popover>
 {/snippet}
 
 {#snippet questProgress(row: QuestRow)}
@@ -1594,9 +1620,21 @@
 	.eq-baglink {
 		color: var(--eq-gold-bright);
 		text-decoration: none;
+		cursor: pointer;
 	}
 
 	.eq-baglink:hover {
+		text-decoration: underline;
+	}
+
+	.eq-weaponlink,
+	.eq-droplink {
+		color: var(--accent, #c9b37a);
+		cursor: pointer;
+	}
+
+	.eq-weaponlink:hover,
+	.eq-droplink:hover {
 		text-decoration: underline;
 	}
 
@@ -1651,6 +1689,7 @@
 	.eq-bis-link {
 		color: var(--eq-gold-bright);
 		text-decoration: none;
+		cursor: pointer;
 	}
 
 	.eq-bis-link:hover {
