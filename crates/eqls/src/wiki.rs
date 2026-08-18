@@ -219,9 +219,14 @@ pub fn parse_item(page_title: &str, wikitext: &str) -> Option<ItemStats> {
 
 fn era_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\{\{\s*([A-Za-z][A-Za-z0-9' ]*?)\s+Era\s*\}\}").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?:\{\{\s*|\[\[Category:\s*)([A-Za-z][A-Za-z0-9' ]*?)\s+Era\s*(?:\}\}|\]\])")
+            .unwrap()
+    })
 }
 
+/// Pages mark the era either as `{{X Era}}` or only as `[[Category:X Era]]`
+/// (e.g. Fist of Lightning).
 fn era_template(wikitext: &str) -> Option<String> {
     era_regex()
         .captures(wikitext)
@@ -700,7 +705,12 @@ mod tests {
             Some("Chardok Revamp")
         );
         assert_eq!(era_template("{{Velious  Era}}").as_deref(), Some("Velious"));
+        assert_eq!(
+            era_template("...}}\n[[Category:Velious Era]]\n[[Category:Monk Equipment]]").as_deref(),
+            Some("Velious")
+        );
         assert_eq!(era_template("no template here"), None);
+        assert_eq!(era_template("[[Category:Monk Equipment]]"), None);
 
         let untagged = parse_item("Plain", "{{Itempage\n|itemname = Plain\n}}").unwrap();
         assert_eq!(untagged.era, None);
