@@ -4,6 +4,10 @@ export function itemPath(name: string): string {
 	return `/i/${encodeURIComponent(name)}`;
 }
 
+export function wikiUrl(name: string): string {
+	return `https://eqlwiki.com/wiki/${encodeURIComponent(name.replaceAll(' ', '_'))}`;
+}
+
 export function iconUrl(stats: ItemStats | undefined): string | null {
 	return stats?.icon ? `/api/v1/icons/${stats.icon}.png` : null;
 }

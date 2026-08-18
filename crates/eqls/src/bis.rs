@@ -50,6 +50,29 @@ pub fn fits_slot(slots: &[String], tokens: &[&str]) -> bool {
         .any(|slot| tokens.iter().any(|token| slot.eq_ignore_ascii_case(token)))
 }
 
+/// EQL runs classic-1999 content only. Untagged wiki pages are kept: plenty of
+/// genuinely classic items (e.g. Bladestopper) carry no era template.
+const EXPANSION_ERAS: &[&str] = &[
+    "kunark",
+    "chardok",
+    "chardok revamp",
+    "epics",
+    "epicquests",
+    "velious",
+    "luclin",
+    "fearhaterevamp",
+];
+
+pub fn in_classic_era(era: Option<&str>) -> bool {
+    match era {
+        None => true,
+        Some(era) => {
+            let era = era.trim().to_lowercase();
+            !EXPANSION_ERAS.contains(&era.as_str())
+        }
+    }
+}
+
 pub fn level_ok(required: Option<i64>, level: Option<i64>) -> bool {
     match (required, level) {
         (Some(required), Some(level)) => required <= level,
@@ -135,6 +158,18 @@ mod tests {
             &["SECONDARY", "SECONDAY"]
         ));
         assert!(!fits_slot(&strings(&["HEAD"]), &["SECONDARY", "SECONDAY"]));
+    }
+
+    #[test]
+    fn expansion_eras_are_out_untagged_and_classic_are_in() {
+        assert!(in_classic_era(None));
+        assert!(in_classic_era(Some("Classic")));
+        assert!(in_classic_era(Some("Sky")));
+        assert!(in_classic_era(Some("Unknown")));
+        assert!(!in_classic_era(Some("Velious")));
+        assert!(!in_classic_era(Some("kunark")));
+        assert!(!in_classic_era(Some("Chardok Revamp")));
+        assert!(!in_classic_era(Some("EpicQuests")));
     }
 
     #[test]

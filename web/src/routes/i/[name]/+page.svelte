@@ -2,7 +2,7 @@
 	import { page } from '$app/state';
 	import { Timestamp } from '@dorsk/tsumikit';
 	import type { ItemStats } from '$lib/api';
-	import { ATTRIBUTES, flags, iconUrl, ratio, RESISTS } from '$lib/items';
+	import { ATTRIBUTES, flags, iconUrl, ratio, RESISTS, wikiUrl } from '$lib/items';
 	import { useItem } from '$lib/queries';
 
 	const key = $derived(page.params.name ?? '');
@@ -134,10 +134,18 @@
 			{#if stats.required_level}
 				<div class="eq-line">Required level of {stats.required_level}.</div>
 			{/if}
+			{#if stats.era}
+				<div class="eq-line eq-faint">Era: {stats.era}</div>
+			{/if}
 
 			<div class="eq-foot">
 				{#if item.data?.upgrade}
 					<span>merge tier +{item.data.upgrade} applied</span>
+				{/if}
+				{#if item.data}
+					<a class="eq-wikilink" href={wikiUrl(item.data.name)} target="_blank" rel="noopener">
+						view on eqlwiki ↗
+					</a>
 				{/if}
 				<span>
 					scraped <Timestamp value={item.data?.scraped_at ?? ''} mode="relative" details={false} />
@@ -240,6 +248,16 @@
 	.eq-faint {
 		color: #8a8470;
 		font-size: 0.75rem;
+	}
+
+	.eq-wikilink {
+		color: #8a8470;
+		text-decoration: none;
+	}
+
+	.eq-wikilink:hover {
+		color: var(--eq-gold-bright);
+		text-decoration: underline;
 	}
 
 	.eq-foot {
