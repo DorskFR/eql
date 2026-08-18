@@ -66,6 +66,8 @@ pub struct ItemStats {
     pub quest_item: bool,
     pub effects: Vec<ItemEffect>,
     pub focus_effect: Option<String>,
+    #[serde(default)]
+    pub era: Option<String>,
     pub unparsed: Vec<String>,
 }
 
@@ -196,6 +198,7 @@ pub fn parse_item(page_title: &str, wikitext: &str) -> Option<ItemStats> {
     let mut stats = ItemStats {
         name,
         icon: get("lucy_img_id").and_then(|v| v.trim().parse().ok()),
+        era: era_template(wikitext),
         ..Default::default()
     };
 
@@ -212,6 +215,17 @@ pub fn parse_item(page_title: &str, wikitext: &str) -> Option<ItemStats> {
         stats.focus_effect = Some(focus);
     }
     Some(stats)
+}
+
+fn era_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\{\{\s*([A-Za-z][A-Za-z0-9' ]*?)\s+Era\s*\}\}").unwrap())
+}
+
+fn era_template(wikitext: &str) -> Option<String> {
+    era_regex()
+        .captures(wikitext)
+        .map(|c| c[1].split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 fn parse_statsblock(block: &str, stats: &mut ItemStats) {
@@ -673,6 +687,23 @@ mod tests {
         assert_eq!(item.hp, None);
         assert!(item.effects.is_empty());
         assert!(item.unparsed.is_empty(), "{:?}", item.unparsed);
+    }
+
+    #[test]
+    fn era_template_lands_in_stats() {
+        let wikitext = "{{Velious Era}}\n{{Itempage\n|itemname = Test Blade\n|statsblock = Slot: PRIMARY<br>\n}}";
+        let item = parse_item("Test Blade", wikitext).unwrap();
+        assert_eq!(item.era.as_deref(), Some("Velious"));
+
+        assert_eq!(
+            era_template("{{Chardok Revamp Era}}").as_deref(),
+            Some("Chardok Revamp")
+        );
+        assert_eq!(era_template("{{Velious  Era}}").as_deref(), Some("Velious"));
+        assert_eq!(era_template("no template here"), None);
+
+        let untagged = parse_item("Plain", "{{Itempage\n|itemname = Plain\n}}").unwrap();
+        assert_eq!(untagged.era, None);
     }
 
     #[test]

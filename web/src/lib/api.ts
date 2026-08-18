@@ -54,6 +54,7 @@ export interface ItemStats {
 	icon: number | null;
 	effects: ItemEffect[];
 	focus_effect: string | null;
+	era?: string | null;
 	unparsed: string[];
 }
 

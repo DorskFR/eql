@@ -57,6 +57,7 @@
 		iconUrl,
 		itemPath,
 		RESISTS,
+		wikiUrl,
 		type StatRow,
 		weaponDamageDelay,
 		weaponRatio
@@ -606,10 +607,9 @@
 		<div class="eq-panel eq-empty">Best-in-slot lookup failed: {bis.error.message}</div>
 	{:else}
 		<div class="eq-faint eq-bis-note">
-			Top candidates from the eqlwiki item database for this loadout ({(inventory.data?.classes ?? []).join(
-				'/'
-			) || 'any class'}{level ? `, level ${level}` : ''}). Base values — merging adds up to +10% per
-			tier on top.
+			Top classic-era candidates from the eqlwiki item database for this loadout ({(inventory.data
+				?.classes ?? []).join('/') || 'any class'}{level ? `, level ${level}` : ''}). Expansion-tagged
+			items are excluded. Base values — merging adds up to +10% per tier on top.
 		</div>
 		<div class="eq-bags">
 			{#each bis.data ?? [] as slot (slot.slot)}
@@ -622,7 +622,7 @@
 							{#each slot.candidates as candidate (candidate.id)}
 								{@const icon = iconUrl(candidate.stats)}
 								{@const owned = equippedBases.has(candidate.name.toLowerCase())}
-								<a class="eq-bis-row" class:eq-bis-owned={owned} href={itemPath(candidate.name)}>
+								<div class="eq-bis-row" class:eq-bis-owned={owned}>
 									{#if icon && !brokenIcons.has(icon)}
 										<img
 											class="eq-icon eq-bis-icon"
@@ -638,15 +638,20 @@
 									{/if}
 									<span class="eq-bis-body">
 										<span class="eq-bis-name">
-											{candidate.name}
+											<a class="eq-bis-link" href={itemPath(candidate.name)}>{candidate.name}</a>
 											{#if owned}<span class="eq-bis-tag">equipped</span>{/if}
+											<a
+												class="eq-bis-wiki"
+												href={wikiUrl(candidate.name)}
+												target="_blank"
+												rel="noopener">wiki ↗</a>
 										</span>
 										<span class="eq-bis-stats">{candidateLine(candidate.stats)}</span>
 										{#if candidate.stats.classes.length}
 											<span class="eq-faint">{candidateClasses(candidate.stats)}</span>
 										{/if}
 									</span>
-								</a>
+								</div>
 							{/each}
 						</div>
 					{/if}
@@ -1641,6 +1646,27 @@
 	.eq-bis-name {
 		color: var(--eq-gold-bright);
 		font-size: 0.8rem;
+	}
+
+	.eq-bis-link {
+		color: var(--eq-gold-bright);
+		text-decoration: none;
+	}
+
+	.eq-bis-link:hover {
+		text-decoration: underline;
+	}
+
+	.eq-bis-wiki {
+		color: #8a8470;
+		font-size: 0.65rem;
+		text-decoration: none;
+		margin-left: 0.45rem;
+	}
+
+	.eq-bis-wiki:hover {
+		color: var(--eq-gold-bright);
+		text-decoration: underline;
 	}
 
 	.eq-bis-tag {

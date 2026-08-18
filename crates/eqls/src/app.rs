@@ -984,6 +984,58 @@ async fn items_by_name(
         .collect()
 }
 
+fn like_escape(name: &str) -> String {
+    name.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// Some wiki pages carry a disambiguation suffix the in-game name lacks:
+/// "The Tenderizer" only exists as "The Tenderizer (Weapon)". Keyed by the
+/// base name; equippable variants win, then the shortest page name.
+async fn items_by_variant(
+    pool: &PgPool,
+    names: &[String],
+) -> Result<HashMap<String, ItemRecord>, sqlx::Error> {
+    if names.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let patterns: Vec<String> = names
+        .iter()
+        .map(|name| format!("{} (%", like_escape(name)))
+        .collect();
+    let rows = sqlx::query(
+        "select id, game_id, name, stats, scraped_at from items where lower(name) like any($1)",
+    )
+    .bind(&patterns)
+    .fetch_all(pool)
+    .await?;
+    let equippable = |item: &ItemRecord| {
+        item.stats
+            .get("slots")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|slots| !slots.is_empty())
+    };
+    let mut map: HashMap<String, ItemRecord> = HashMap::new();
+    for row in &rows {
+        let item = item_from_row(row)?;
+        let lower = item.name.to_lowercase();
+        let Some((base, _)) = lower.rsplit_once(" (") else {
+            continue;
+        };
+        let wins = |challenger: &ItemRecord, holder: &ItemRecord| {
+            (
+                equippable(challenger),
+                std::cmp::Reverse(challenger.name.len()),
+            ) > (equippable(holder), std::cmp::Reverse(holder.name.len()))
+        };
+        if map.get(base).is_none_or(|holder| wins(&item, holder)) {
+            map.insert(base.to_string(), item);
+        }
+    }
+    Ok(map)
+}
+
 struct Snapshot {
     character: String,
     server: String,
@@ -1090,7 +1142,15 @@ async fn join_items(
         .collect();
     names.sort_unstable();
     names.dedup();
-    let items = items_by_name(pool, &names).await?;
+    let mut items = items_by_name(pool, &names).await?;
+    let misses: Vec<String> = names
+        .iter()
+        .filter(|name| !items.contains_key(*name))
+        .cloned()
+        .collect();
+    for (base, item) in items_by_variant(pool, &misses).await? {
+        items.entry(base).or_insert(item);
+    }
 
     let mut views: Vec<InventoryEntryView> = entries
         .into_iter()
@@ -1284,7 +1344,7 @@ async fn get_item(
     if let Some(row) = row {
         return Ok(Json(item_from_row(&row)?));
     }
-    for (candidate, tier) in name_candidates(&key).into_iter().skip(1) {
+    for (candidate, tier) in name_candidates(&key) {
         let row = sqlx::query(
             "select id, game_id, name, stats, scraped_at from items \
              where lower(name) = $1 limit 1",
@@ -1292,8 +1352,13 @@ async fn get_item(
         .bind(&candidate)
         .fetch_optional(&state.pool)
         .await?;
-        if let Some(row) = row {
-            let mut item = item_from_row(&row)?;
+        let item = match row {
+            Some(row) => Some(item_from_row(&row)?),
+            None => items_by_variant(&state.pool, std::slice::from_ref(&candidate))
+                .await?
+                .remove(&candidate),
+        };
+        if let Some(mut item) = item {
             if let Some(tier) = tier {
                 crate::upgrade::apply_upgrade(&mut item.stats, tier);
                 item.upgrade = Some(tier);
@@ -1333,6 +1398,7 @@ async fn character_bis(
         })
         .filter(|(_, stats)| {
             !stats.temporary
+                && bis::in_classic_era(stats.era.as_deref())
                 && (snapshot.classes.is_empty()
                     || bis::usable_by(&stats.classes, &snapshot.classes))
                 && bis::level_ok(stats.required_level, snapshot.level)
@@ -3254,26 +3320,34 @@ mod tests {
         let Some((app, pool)) = live_app().await else {
             return;
         };
-        let seed = |name: &str, slots: &[&str], ac: i64| {
+        let seed = |name: &str, slots: &[&str], ac: i64, era: Option<&str>| {
             serde_json::to_value(ItemStats {
                 name: name.to_string(),
                 slots: slots.iter().map(|s| (*s).to_string()).collect(),
                 ac: Some(ac),
+                era: era.map(str::to_string),
                 ..Default::default()
             })
             .unwrap()
         };
-        for (name, slots, ac) in [
-            ("Iron Shield", &["SECONDARY"] as &[&str], 10),
-            ("Tower of Power", &["SECONDARY"], 50),
-            ("Fancy Hat", &["HEAD"], 7),
+        for (name, slots, ac, era) in [
+            ("Iron Shield", &["SECONDARY"] as &[&str], 10, None),
+            ("Tower of Power", &["SECONDARY"], 50, None),
+            ("Fancy Hat", &["HEAD"], 7, None),
+            ("Outlander Claymore", &["SECONDARY"], 99, Some("Velious")),
+            (
+                "The Tenderizer (Weapon)",
+                &["SECONDARY"],
+                4,
+                Some("Classic"),
+            ),
         ] {
             sqlx::query(
                 "insert into items (name, stats, wikitext) values ($1, $2, '') \
                  on conflict (name) do update set stats = excluded.stats",
             )
             .bind(name)
-            .bind(SqlJson(seed(name, slots, ac)))
+            .bind(SqlJson(seed(name, slots, ac, era)))
             .execute(&pool)
             .await
             .unwrap();
@@ -3281,7 +3355,8 @@ mod tests {
 
         let upload = r#"{"character":"Bisk","server":"erudin","entries":[
             {"location":"Any Slot","name":"Iron Shield","id":1,"count":1,"slots":0},
-            {"location":"Any Slot","name":"Iron Shield","id":1,"count":1,"slots":0}]}"#;
+            {"location":"Any Slot","name":"Iron Shield","id":1,"count":1,"slots":0},
+            {"location":"Secondary","name":"The Tenderizer +9","id":2,"count":1,"slots":0}]}"#;
         let request = Request::builder()
             .method("POST")
             .uri("/api/v1/inventory")
@@ -3316,6 +3391,11 @@ mod tests {
             .map(|c| c["name"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(secondary[..2], ["Tower of Power", "Iron Shield"]);
+        assert!(
+            !secondary.contains(&"Outlander Claymore".to_string()),
+            "expansion-era items stay out of BiS: {secondary:?}"
+        );
+        assert!(secondary.contains(&"The Tenderizer (Weapon)".to_string()));
         let focus: Vec<_> = of("Focus")
             .iter()
             .map(|c| c["name"].as_str().unwrap().to_string())
@@ -3339,6 +3419,41 @@ mod tests {
         assert_eq!(item["name"], "Iron Shield");
         assert_eq!(item["upgrade"], 2);
         assert_eq!(item["stats"]["ac"], 12);
+
+        let (status, inventory) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/characters/erudin/Bisk/inventory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tenderizer = inventory["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["location"] == "Secondary")
+            .expect("Secondary entry present");
+        assert_eq!(
+            tenderizer["item"]["name"], "The Tenderizer (Weapon)",
+            "a dump name without the wiki's disambiguation suffix still joins"
+        );
+        assert_eq!(tenderizer["upgrade"], 9);
+        assert_eq!(tenderizer["item"]["stats"]["ac"], 13, "4 scaled by +9");
+
+        let (status, item) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/items/The%20Tenderizer%20+9")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(item["name"], "The Tenderizer (Weapon)");
+        assert_eq!(item["upgrade"], 9);
+        assert_eq!(item["stats"]["ac"], 13);
     }
 
     #[tokio::test]
