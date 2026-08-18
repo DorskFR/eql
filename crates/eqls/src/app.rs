@@ -101,6 +101,7 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
             "/api/v1/characters/{server}/{name}/fights",
             get(list_fights),
         )
+        .route("/api/v1/version", get(version))
         .route("/api/v1/icons/{file}", get(get_icon))
         .route("/api/v1/items", get(search_items))
         .route("/api/v1/items/{key}", get(get_item))
@@ -124,6 +125,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn readyz(State(state): State<AppState>) -> Response {
@@ -962,6 +967,18 @@ fn item_from_dump(found: &DumpIcon) -> ItemRecord {
     }
 }
 
+/// Apostrophe variants differ between the dumps and the wiki page titles
+/// ("Djarn's Amethyst Ring" vs "Djarns Amethyst Ring"), so the join folds
+/// them away on both sides. `SQL_FOLD` must strip the same characters.
+fn fold_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '`' | '\u{2019}'))
+        .collect()
+}
+
+const SQL_FOLD: &str = "translate(lower(name), e'\\'`\\u2019', '')";
+
 /// Wiki item pages carry no in-game item id, so the join is by folded name.
 async fn items_by_name(
     pool: &PgPool,
@@ -970,18 +987,19 @@ async fn items_by_name(
     if names.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows = sqlx::query(
-        "select id, game_id, name, stats, scraped_at from items where lower(name) = any($1)",
-    )
-    .bind(names)
+    let folded: Vec<String> = names.iter().map(|name| fold_name(name)).collect();
+    let rows = sqlx::query(&format!(
+        "select id, game_id, name, stats, scraped_at from items where {SQL_FOLD} = any($1)"
+    ))
+    .bind(&folded)
     .fetch_all(pool)
     .await?;
-    rows.iter()
-        .map(|row| {
-            let item = item_from_row(row)?;
-            Ok((item.name.to_lowercase(), item))
-        })
-        .collect()
+    let mut map = HashMap::new();
+    for row in &rows {
+        let item = item_from_row(row)?;
+        map.entry(fold_name(&item.name)).or_insert(item);
+    }
+    Ok(map)
 }
 
 fn like_escape(name: &str) -> String {
@@ -1002,11 +1020,11 @@ async fn items_by_variant(
     }
     let patterns: Vec<String> = names
         .iter()
-        .map(|name| format!("{} (%", like_escape(name)))
+        .map(|name| format!("{} (%", like_escape(&fold_name(name))))
         .collect();
-    let rows = sqlx::query(
-        "select id, game_id, name, stats, scraped_at from items where lower(name) like any($1)",
-    )
+    let rows = sqlx::query(&format!(
+        "select id, game_id, name, stats, scraped_at from items where {SQL_FOLD} like any($1)"
+    ))
     .bind(&patterns)
     .fetch_all(pool)
     .await?;
@@ -1019,8 +1037,8 @@ async fn items_by_variant(
     let mut map: HashMap<String, ItemRecord> = HashMap::new();
     for row in &rows {
         let item = item_from_row(row)?;
-        let lower = item.name.to_lowercase();
-        let Some((base, _)) = lower.rsplit_once(" (") else {
+        let folded = fold_name(&item.name);
+        let Some((base, _)) = folded.rsplit_once(" (") else {
             continue;
         };
         let wins = |challenger: &ItemRecord, holder: &ItemRecord| {
@@ -1120,7 +1138,7 @@ fn resolve_item(
     name: &str,
 ) -> (Option<ItemRecord>, Option<u32>) {
     for (candidate, level) in name_candidates(name) {
-        if let Some(item) = items.get(&candidate) {
+        if let Some(item) = items.get(&fold_name(&candidate)) {
             return (Some(item.clone()), level);
         }
     }
@@ -1145,7 +1163,7 @@ async fn join_items(
     let mut items = items_by_name(pool, &names).await?;
     let misses: Vec<String> = names
         .iter()
-        .filter(|name| !items.contains_key(*name))
+        .filter(|name| !items.contains_key(&fold_name(name)))
         .cloned()
         .collect();
     for (base, item) in items_by_variant(pool, &misses).await? {
@@ -1253,6 +1271,10 @@ struct StatsView {
     race: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     base: Option<stats::BaseAttributes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vitals: Option<stats::VitalsEstimate>,
     stats: GearStats,
     equipped: Vec<InventoryEntryView>,
 }
@@ -1281,6 +1303,18 @@ async fn character_stats(
         stats::base_attributes(race, snapshot.classes.first().map(String::as_str))
     });
 
+    let gear = derive_gear_stats(&pairs);
+    let vitals = match (base.as_ref(), snapshot.level) {
+        (Some(base), Some(level)) => stats::estimate_vitals(
+            &snapshot.classes,
+            level,
+            base.sta + gear.sta,
+            base.intelligence + gear.intelligence,
+            base.wis + gear.wis,
+        ),
+        _ => None,
+    };
+
     Ok(Json(StatsView {
         character: snapshot.character,
         server: snapshot.server,
@@ -1289,7 +1323,9 @@ async fn character_stats(
         classes: snapshot.classes,
         race: snapshot.race,
         base,
-        stats: derive_gear_stats(&pairs),
+        level: snapshot.level,
+        vitals,
+        stats: gear,
         equipped: views
             .into_iter()
             .filter(|view| {
@@ -1345,18 +1381,18 @@ async fn get_item(
         return Ok(Json(item_from_row(&row)?));
     }
     for (candidate, tier) in name_candidates(&key) {
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             "select id, game_id, name, stats, scraped_at from items \
-             where lower(name) = $1 limit 1",
-        )
-        .bind(&candidate)
+             where {SQL_FOLD} = $1 limit 1"
+        ))
+        .bind(fold_name(&candidate))
         .fetch_optional(&state.pool)
         .await?;
         let item = match row {
             Some(row) => Some(item_from_row(&row)?),
             None => items_by_variant(&state.pool, std::slice::from_ref(&candidate))
                 .await?
-                .remove(&candidate),
+                .remove(&fold_name(&candidate)),
         };
         if let Some(mut item) = item {
             if let Some(tier) = tier {
@@ -3181,7 +3217,7 @@ mod tests {
     fn resolve_item_matches_starred_and_parenthesised_names() {
         let mut items = HashMap::new();
         items.insert("backpack".to_string(), item_named(1, "Backpack"));
-        items.insert("savant's cap".to_string(), item_named(2, "Savant's Cap"));
+        items.insert(fold_name("Savant's Cap"), item_named(2, "Savant's Cap"));
 
         let (item, upgrade) = resolve_item(&items, "Backpack*");
         assert_eq!(item.unwrap().id, 1);
@@ -3341,6 +3377,7 @@ mod tests {
                 4,
                 Some("Classic"),
             ),
+            ("Djarns Amethyst Ring", &["FINGER"], 2, None),
         ] {
             sqlx::query(
                 "insert into items (name, stats, wikitext) values ($1, $2, '') \
@@ -3356,7 +3393,8 @@ mod tests {
         let upload = r#"{"character":"Bisk","server":"erudin","entries":[
             {"location":"Any Slot","name":"Iron Shield","id":1,"count":1,"slots":0},
             {"location":"Any Slot","name":"Iron Shield","id":1,"count":1,"slots":0},
-            {"location":"Secondary","name":"The Tenderizer +9","id":2,"count":1,"slots":0}]}"#;
+            {"location":"Secondary","name":"The Tenderizer +9","id":2,"count":1,"slots":0},
+            {"location":"Fingers","name":"Djarn's Amethyst Ring","id":3,"count":1,"slots":0}]}"#;
         let request = Request::builder()
             .method("POST")
             .uri("/api/v1/inventory")
@@ -3454,6 +3492,28 @@ mod tests {
         assert_eq!(item["name"], "The Tenderizer (Weapon)");
         assert_eq!(item["upgrade"], 9);
         assert_eq!(item["stats"]["ac"], 13);
+
+        let ring = inventory["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["location"] == "Fingers")
+            .expect("Fingers entry present");
+        assert_eq!(
+            ring["item"]["name"], "Djarns Amethyst Ring",
+            "an apostrophe in the dump joins a quoteless wiki title"
+        );
+
+        let (status, item) = json_of(
+            &app,
+            Request::builder()
+                .uri("/api/v1/items/Djarn's%20Amethyst%20Ring")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(item["name"], "Djarns Amethyst Ring");
     }
 
     #[tokio::test]

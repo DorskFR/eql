@@ -92,6 +92,77 @@ pub fn base_attributes(race: &str, primary_class: Option<&str>) -> Option<BaseAt
     })
 }
 
+/// Classic HP level multiplier (p99 table). EQL's Game_Mechanics STA→HP
+/// snapshots match it at levels 50 and 60 for every class family.
+fn hp_level_multiplier(class: &str, level: i64) -> Option<i64> {
+    let brackets: &[(i64, i64)] = match class.to_uppercase().as_str() {
+        "WAR" => &[
+            (19, 22),
+            (29, 23),
+            (39, 25),
+            (52, 27),
+            (56, 28),
+            (59, 29),
+            (65, 30),
+        ],
+        "PAL" | "SHD" => &[(34, 21), (44, 22), (50, 23), (55, 24), (59, 25), (65, 26)],
+        "RNG" => &[(57, 20), (65, 21)],
+        "MNK" | "ROG" | "BRD" | "BST" => &[(50, 18), (57, 19), (65, 20)],
+        "CLR" | "DRU" | "SHM" => &[(65, 15)],
+        "NEC" | "WIZ" | "MAG" | "ENC" => &[(65, 12)],
+        "BER" => &[(50, 18), (57, 19), (65, 20)],
+        _ => return None,
+    };
+    brackets
+        .iter()
+        .find(|(top, _)| level <= *top)
+        .map(|(_, lm)| *lm)
+}
+
+const WIS_CASTERS: [&str; 5] = ["CLR", "DRU", "SHM", "PAL", "RNG"];
+const INT_CASTERS: [&str; 6] = ["NEC", "WIZ", "MAG", "ENC", "SHD", "BST"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct VitalsEstimate {
+    pub hp: i64,
+    pub mana: Option<i64>,
+}
+
+/// Classic formulas, best class of the loadout: HP = 5 + lvl·LM +
+/// ⌊STA·lvl·LM/300⌋; mana ≈ (stat/5 + 2)·lvl for the loadout's best caster
+/// stat. How EQL blends three classes is unpublished, so this is an estimate.
+pub fn estimate_vitals(
+    classes: &[String],
+    level: i64,
+    sta: i64,
+    intelligence: i64,
+    wis: i64,
+) -> Option<VitalsEstimate> {
+    if level < 1 {
+        return None;
+    }
+    let lm = classes
+        .iter()
+        .filter_map(|class| hp_level_multiplier(class, level))
+        .max()?;
+    let hp = 5 + level * lm + sta * level * lm / 300;
+    let caster_stat = classes
+        .iter()
+        .filter_map(|class| {
+            let class = class.to_uppercase();
+            if WIS_CASTERS.contains(&class.as_str()) {
+                Some(wis)
+            } else if INT_CASTERS.contains(&class.as_str()) {
+                Some(intelligence)
+            } else {
+                None
+            }
+        })
+        .max();
+    let mana = caster_stat.map(|stat| (stat / 5 + 2) * level);
+    Some(VitalsEstimate { hp, mana })
+}
+
 pub fn is_equipped_location(location: &str) -> bool {
     !location.contains("-Slot")
         && !CONTAINER_PREFIXES
@@ -544,6 +615,56 @@ mod tests {
         assert_eq!(plain.strength, 60);
         assert_eq!(plain.intelligence, 99);
         assert!(base_attributes("Vulcan", Some("SHD")).is_none());
+    }
+
+    #[test]
+    fn hp_multiplier_matches_the_eqlwiki_sta_snapshots() {
+        for (class, level, per_sta) in [
+            ("WAR", 50, 4.5),
+            ("WAR", 60, 6.0),
+            ("SHD", 50, 3.8),
+            ("SHD", 60, 5.2),
+            ("RNG", 50, 3.3),
+            ("MNK", 50, 3.0),
+            ("SHM", 50, 2.5),
+            ("WIZ", 50, 2.0),
+            ("WIZ", 60, 2.4),
+        ] {
+            let lm = hp_level_multiplier(class, level).unwrap();
+            let computed = (lm * level) as f64 / 300.0;
+            assert!(
+                (computed - per_sta).abs() < 0.05,
+                "{class} at {level}: {computed} vs wiki {per_sta}"
+            );
+        }
+        assert_eq!(hp_level_multiplier("SHD", 43), Some(22));
+        assert_eq!(hp_level_multiplier("XYZ", 43), None);
+    }
+
+    #[test]
+    fn vitals_take_the_best_class_of_the_loadout() {
+        let classes: Vec<String> = ["MNK", "SHD", "SHM"]
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+        let vitals = estimate_vitals(&classes, 43, 100, 130, 90).unwrap();
+        assert_eq!(
+            vitals.hp,
+            5 + 43 * 22 + 100 * 43 * 22 / 300,
+            "SHD multiplier wins"
+        );
+        assert_eq!(
+            vitals.mana,
+            Some((130 / 5 + 2) * 43),
+            "SHD INT beats SHM WIS here"
+        );
+
+        let monk_only = vec!["MNK".to_string()];
+        assert_eq!(
+            estimate_vitals(&monk_only, 43, 100, 130, 90).unwrap().mana,
+            None
+        );
+        assert!(estimate_vitals(&[], 43, 100, 130, 90).is_none());
     }
 
     #[test]

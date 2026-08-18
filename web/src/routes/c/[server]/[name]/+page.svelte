@@ -274,6 +274,7 @@
 
 	const stats = $derived(gear.data?.stats);
 	const base = $derived(gear.data?.base);
+	const vitals = $derived(gear.data?.vitals);
 	const attributes = $derived(stats ? gearPairs(stats, ATTRIBUTES) : []);
 	const totalAttributes = $derived(base && stats ? attributeTotals(base, stats) : []);
 	const resists = $derived(stats ? gearPairs(stats, RESISTS) : []);
@@ -458,16 +459,45 @@
 					</div>
 
 					<div class="eq-panel">
-						<div class="eq-panel-title">Vitals · from gear</div>
-						<div class="eq-vitals">
-							<div class="eq-row"><span>HP</span><b class="eq-green">+{stats?.hp ?? totals.hp}</b></div>
-							<div class="eq-row"><span>Mana</span><b class="eq-blue">+{stats?.mana ?? totals.mana}</b></div>
-							<div class="eq-row"><span>End</span><b class="eq-tan">+{stats?.endurance ?? 0}</b></div>
-							<div class="eq-row"><span>AC</span><b class="eq-green">+{stats?.ac ?? totals.ac}</b></div>
-							{#if stats?.haste}
-								<div class="eq-row"><span>Haste</span><b class="eq-green">{stats.haste}%</b></div>
-							{/if}
-						</div>
+						{#if vitals && stats}
+							<div class="eq-panel-title">Vitals</div>
+							<div class="eq-vitals">
+								<div class="eq-row">
+									<span>HP</span>
+									<span>
+										<span class="eq-gearpart eq-green">+{stats.hp}</span>
+										<b>{vitals.hp + stats.hp}</b>
+									</span>
+								</div>
+								<div class="eq-row">
+									<span>Mana</span>
+									<span>
+										<span class="eq-gearpart eq-blue">+{stats.mana}</span>
+										<b>{(vitals.mana ?? 0) + stats.mana}</b>
+									</span>
+								</div>
+								<div class="eq-row"><span>End</span><b class="eq-tan">+{stats.endurance}</b></div>
+								<div class="eq-row"><span>AC</span><b class="eq-green">+{stats.ac}</b></div>
+								{#if stats.haste}
+									<div class="eq-row"><span>Haste</span><b class="eq-green">{stats.haste}%</b></div>
+								{/if}
+							</div>
+							<div class="eq-faint">
+								HP and mana estimated with the classic formulas from level, class and attributes;
+								endurance and AC are gear only.
+							</div>
+						{:else}
+							<div class="eq-panel-title">Vitals · from gear</div>
+							<div class="eq-vitals">
+								<div class="eq-row"><span>HP</span><b class="eq-green">+{stats?.hp ?? totals.hp}</b></div>
+								<div class="eq-row"><span>Mana</span><b class="eq-blue">+{stats?.mana ?? totals.mana}</b></div>
+								<div class="eq-row"><span>End</span><b class="eq-tan">+{stats?.endurance ?? 0}</b></div>
+								<div class="eq-row"><span>AC</span><b class="eq-green">+{stats?.ac ?? totals.ac}</b></div>
+								{#if stats?.haste}
+									<div class="eq-row"><span>Haste</span><b class="eq-green">{stats.haste}%</b></div>
+								{/if}
+							</div>
+						{/if}
 					</div>
 
 					<div class="eq-panel">
@@ -753,15 +783,32 @@
 	{:else}
 		<Stack gap="var(--sp-3)">
 			<Text variant="caption" tone="faint">
-				Gear values include merge (+N) tier bonuses. HP, mana and endurance are from gear only —
-				level-based vitals are not derivable from the dumps.
+				Gear values include merge (+N) tier bonuses.
+				{#if vitals}
+					HP and mana totals are estimated with the classic formulas from level, class and
+					attributes; endurance is from gear only.
+				{:else}
+					HP, mana and endurance are from gear only — run /who in game so level, race and class
+					are known.
+				{/if}
 				{stats.known_items} of {stats.equipped_count} equipped items are in the item database.
 			</Text>
 
 			<AutoGrid min="10rem">
 				<Metric label="AC" value={stats.ac} icon="lock" tone="info" />
-				<Metric label="HP" value={stats.hp} icon="heart" tone="ok" />
-				<Metric label="Mana" value={stats.mana} icon="star" tone="info" />
+				{#if vitals}
+					<Metric label="HP" value={vitals.hp + stats.hp} icon="heart" tone="ok" sub={`+${stats.hp} from gear`} />
+					<Metric
+						label="Mana"
+						value={(vitals.mana ?? 0) + stats.mana}
+						icon="star"
+						tone="info"
+						sub={`+${stats.mana} from gear`}
+					/>
+				{:else}
+					<Metric label="HP" value={stats.hp} icon="heart" tone="ok" />
+					<Metric label="Mana" value={stats.mana} icon="star" tone="info" />
+				{/if}
 				<Metric label="Endurance" value={stats.endurance} icon="live" />
 				<Metric label="Haste" value={stats.haste} unit="%" icon="clock" sub="highest worn" />
 				<Metric label="Weight" value={stats.weight} icon="archive" />
