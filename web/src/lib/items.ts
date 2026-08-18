@@ -4,8 +4,9 @@ export function itemPath(name: string): string {
 	return `/i/${encodeURIComponent(name)}`;
 }
 
+/** eqlwiki's article path is `/$1` (no `/wiki/` prefix), per its siteinfo API. */
 export function wikiUrl(name: string): string {
-	return `https://eqlwiki.com/wiki/${encodeURIComponent(name.replaceAll(' ', '_'))}`;
+	return `https://eqlwiki.com/${encodeURIComponent(name.replaceAll(' ', '_'))}`;
 }
 
 export function iconUrl(stats: ItemStats | undefined): string | null {
