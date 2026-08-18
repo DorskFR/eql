@@ -7,11 +7,9 @@ const stats = (icon: number | null) => ({ icon }) as ItemStats;
 describe('wikiUrl', () => {
 	it('links the eqlwiki page with underscores', () => {
 		expect(wikiUrl('The Tenderizer (Weapon)')).toBe(
-			'https://eqlwiki.com/wiki/The_Tenderizer_(Weapon)'
+			'https://eqlwiki.com/The_Tenderizer_(Weapon)'
 		);
-		expect(wikiUrl("Djarn's Amethyst Ring")).toBe(
-			"https://eqlwiki.com/wiki/Djarn's_Amethyst_Ring"
-		);
+		expect(wikiUrl("Djarn's Amethyst Ring")).toBe("https://eqlwiki.com/Djarn's_Amethyst_Ring");
 	});
 });
 
