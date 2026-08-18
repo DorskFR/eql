@@ -176,6 +176,11 @@ export interface BaseAttributes {
 	cha: number;
 }
 
+export interface VitalsEstimate {
+	hp: number;
+	mana: number | null;
+}
+
 export interface StatsView {
 	character: string;
 	server: string;
@@ -184,6 +189,8 @@ export interface StatsView {
 	classes: string[];
 	race: string | null;
 	base?: BaseAttributes;
+	level?: number;
+	vitals?: VitalsEstimate;
 	stats: GearStats;
 	equipped: InventoryEntry[];
 }

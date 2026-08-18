@@ -10,6 +10,14 @@
 			queries: { retry: 1, staleTime: 5_000, refetchOnWindowFocus: false }
 		}
 	});
+
+	let serverVersion = $state('');
+	$effect(() => {
+		fetch('/api/v1/version')
+			.then((r) => r.json())
+			.then((v: { version: string }) => (serverVersion = v.version))
+			.catch(() => {});
+	});
 </script>
 
 <QueryClientProvider client={queryClient}>
@@ -26,6 +34,29 @@
 				<ThemePicker />
 			</Cluster>
 			{@render children()}
+			{#if serverVersion}
+				<footer class="version">
+					<a href="https://github.com/DorskFR/eql/releases/tag/v{serverVersion}">
+						eql v{serverVersion}
+					</a>
+				</footer>
+			{/if}
 		</Stack>
 	</Container>
 </QueryClientProvider>
+
+<style>
+	.version {
+		text-align: center;
+		font-size: 0.7rem;
+	}
+
+	.version a {
+		color: var(--text-muted, #8a8470);
+		text-decoration: none;
+	}
+
+	.version a:hover {
+		text-decoration: underline;
+	}
+</style>
