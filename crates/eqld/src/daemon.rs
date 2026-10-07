@@ -60,18 +60,6 @@ pub fn bytes_hash(bytes: &[u8]) -> String {
         })
 }
 
-pub fn needs_read(previous: Option<&FileState>, mtime: Option<i64>, len: u64) -> bool {
-    match previous {
-        None => true,
-        Some(previous) => {
-            previous.last_status.needs_retry()
-                || previous.len != len
-                || mtime.is_none()
-                || previous.mtime != mtime
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Upload,
@@ -1214,11 +1202,6 @@ impl Daemon {
         let len = metadata.len();
         let mtime = metadata.modified().ok().and_then(unix_secs);
 
-        if !needs_read(self.state.files.get(&file_name), mtime, len) {
-            report.skipped += 1;
-            return Ok(false);
-        }
-
         let contents = std::fs::read_to_string(path)?;
         let hash = content_hash(&contents);
         match decide(self.state.files.get(&file_name), &hash) {
@@ -1491,8 +1474,8 @@ impl Daemon {
         let file_name = group.key.clone();
         let mut len = 0;
         let mut mtime = None;
-        // Hashed whole every tick, unlike inventory: a same-second rewrite of
-        // equal length slips past an mtime+len gate, and these files are capped.
+        // Hashed whole every tick: a same-second rewrite of equal length slips
+        // past an mtime+len gate, and these files are capped.
         let mut contents = Vec::new();
         for (path, _) in &group.files {
             let metadata = std::fs::metadata(path)?;
@@ -1764,16 +1747,6 @@ mod tests {
     }
 
     #[test]
-    fn unseen_and_changed_files_are_read() {
-        assert!(needs_read(None, Some(10), 5));
-        let previous = file_state(10, 5, "h", LastStatus::Uploaded);
-        assert!(!needs_read(Some(&previous), Some(10), 5));
-        assert!(needs_read(Some(&previous), Some(11), 5));
-        assert!(needs_read(Some(&previous), Some(10), 6));
-        assert!(needs_read(Some(&previous), None, 5));
-    }
-
-    #[test]
     fn failed_uploads_stay_dirty_across_ticks() {
         let previous = file_state(
             10,
@@ -1783,14 +1756,12 @@ mod tests {
                 error: "boom".into(),
             },
         );
-        assert!(needs_read(Some(&previous), Some(10), 5));
         assert_eq!(decide(Some(&previous), "h"), Decision::Upload);
     }
 
     #[test]
     fn touched_but_identical_content_is_not_reuploaded() {
         let previous = file_state(10, 5, "h", LastStatus::Uploaded);
-        assert!(needs_read(Some(&previous), Some(99), 5));
         assert_eq!(decide(Some(&previous), "h"), Decision::SkipAlreadyUploaded);
     }
 
