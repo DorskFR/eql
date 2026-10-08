@@ -2017,6 +2017,9 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use http_body_util::BodyExt;
+    use sqlx::postgres::{PgConnectOptions, PgConnection};
+    use sqlx::Connection;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use tower::ServiceExt;
 
     fn test_app() -> Router {
@@ -2168,35 +2171,82 @@ mod tests {
         );
     }
 
-    /// Runs against a throwaway database when `EQLS_TEST_DATABASE_URL` is set;
-    /// the suite stays green on machines without one.
-    async fn live_app() -> Option<(Router, PgPool)> {
-        let url = std::env::var("EQLS_TEST_DATABASE_URL").ok()?;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect(&url)
-            .await
-            .expect("EQLS_TEST_DATABASE_URL is set but unreachable");
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        sqlx::query("truncate characters restart identity cascade")
-            .execute(&pool)
-            .await
-            .unwrap();
+    /// Each caller gets its own freshly migrated database on the server named by
+    /// `EQLS_TEST_DATABASE_URL`, dropped with the returned guard, so tests never
+    /// collide however they are parallelised; the suite stays green on machines
+    /// without one.
+    async fn live_app() -> Option<(Router, PgPool, TestDb)> {
+        let db = TestDb::create().await?;
         let app = router(
-            AppState::new(pool.clone(), Arc::from("s3cret")),
+            AppState::new(db.pool.clone(), Arc::from("s3cret")),
             PathBuf::from("web/build"),
         );
-        Some((app, pool))
+        Some((app, db.pool.clone(), db))
+    }
+
+    struct TestDb {
+        server: PgConnectOptions,
+        name: String,
+        pool: PgPool,
+    }
+
+    impl TestDb {
+        async fn create() -> Option<Self> {
+            let url = std::env::var("EQLS_TEST_DATABASE_URL").ok()?;
+            let server: PgConnectOptions = url
+                .parse()
+                .expect("EQLS_TEST_DATABASE_URL is not a postgres url");
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let name = format!(
+                "eqls_test_{}_{}_{}",
+                std::process::id(),
+                OffsetDateTime::now_utc().unix_timestamp(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            let mut admin = PgConnection::connect_with(&server)
+                .await
+                .expect("EQLS_TEST_DATABASE_URL is set but unreachable");
+            sqlx::query(&format!(r#"create database "{name}""#))
+                .execute(&mut admin)
+                .await
+                .unwrap();
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(4)
+                .connect_with(server.clone().database(&name))
+                .await
+                .unwrap();
+            sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+            Some(Self { server, name, pool })
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let server = self.server.clone();
+            let name = self.name.clone();
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        if let Ok(mut admin) = PgConnection::connect_with(&server).await {
+                            let _ = sqlx::query(&format!(r#"drop database "{name}" with (force)"#))
+                                .execute(&mut admin)
+                                .await;
+                        }
+                    })
+            })
+            .join()
+            .ok();
+        }
     }
 
     #[tokio::test]
     async fn device_logs_land_dedupe_and_read_back_in_order() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, _pool, _db)) = live_app().await else {
             return;
         };
-        sqlx::query("truncate device_logs restart identity")
-            .execute(&pool)
-            .await
-            .unwrap();
 
         let post = |body: String| {
             layout_write("POST", "/api/v1/device-logs", Some("s3cret"), &body.clone())
@@ -2322,7 +2372,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_upsert_the_character_and_page_newest_first() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, pool, _db)) = live_app().await else {
             return;
         };
 
@@ -2410,7 +2460,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_who_row_names_the_character_and_never_goes_backwards() {
-        let Some((app, _pool)) = live_app().await else {
+        let Some((app, _pool, _db)) = live_app().await else {
             return;
         };
 
@@ -2453,7 +2503,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_character_who_never_ran_who_reads_as_unknown() {
-        let Some((app, _pool)) = live_app().await else {
+        let Some((app, _pool, _db)) = live_app().await else {
             return;
         };
         json_of(&app, post_events("s3cret", BATCH)).await;
@@ -2521,7 +2571,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_class_combination_keeps_its_own_profile() {
-        let Some((app, _pool)) = live_app().await else {
+        let Some((app, _pool, _db)) = live_app().await else {
             return;
         };
 
@@ -2657,7 +2707,7 @@ mod tests {
 
     #[tokio::test]
     async fn harvest_docs_upsert_latest_wins_and_read_back_per_kind() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, pool, _db)) = live_app().await else {
             return;
         };
 
@@ -2795,7 +2845,7 @@ mod tests {
 
     #[tokio::test]
     async fn fights_accumulate_dedupe_and_page_newest_first() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, pool, _db)) = live_app().await else {
             return;
         };
 
@@ -2985,14 +3035,9 @@ mod tests {
 
     #[tokio::test]
     async fn layouts_round_trip_and_produce_a_downloadable_bundle() {
-        let Some((app, _pool)) = live_app().await else {
+        let Some((app, _pool, _db)) = live_app().await else {
             return;
         };
-        sqlx::query("truncate layouts restart identity")
-            .execute(&_pool)
-            .await
-            .unwrap();
-
         let (status, cloned) = json_of(
             &app,
             layout_write(
@@ -3264,7 +3309,7 @@ mod tests {
 
     #[tokio::test]
     async fn upgraded_items_scale_stats_by_merge_tier() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, pool, _db)) = live_app().await else {
             return;
         };
         let stats_json = |name: &str, ac, hp, mana| {
@@ -3353,7 +3398,7 @@ mod tests {
 
     #[tokio::test]
     async fn bis_ranks_usable_items_and_item_lookup_scales_merge_tiers() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, pool, _db)) = live_app().await else {
             return;
         };
         let seed = |name: &str, slots: &[&str], ac: i64, era: Option<&str>| {
@@ -3518,14 +3563,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_item_dump_fills_icons_the_wiki_has_no_page_for() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, pool, _db)) = live_app().await else {
             return;
         };
-        sqlx::query("truncate item_icon_names")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let path = std::env::temp_dir().join("eqls-item-dump-test.sql");
+        let path =
+            std::env::temp_dir().join(format!("eqls-item-dump-test-{}.sql", std::process::id()));
         std::fs::write(&path, crate::itemdump::SAMPLE).unwrap();
         let load = |path: &std::path::Path| vec!["--file".to_string(), path.display().to_string()];
         let summary = crate::itemdump::run(&pool, &load(&path)).await.unwrap();
@@ -3685,13 +3727,9 @@ mod tests {
 
     #[tokio::test]
     async fn icon_sheets_upsert_and_serve_cropped_pngs() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, pool, _db)) = live_app().await else {
             return;
         };
-        sqlx::query("truncate item_icons")
-            .execute(&pool)
-            .await
-            .unwrap();
 
         let (status, accepted) = json_of(
             &app,
@@ -3761,7 +3799,7 @@ mod tests {
 
     #[tokio::test]
     async fn reparse_rewrites_stats_from_the_stored_wikitext() {
-        let Some((app, pool)) = live_app().await else {
+        let Some((app, pool, _db)) = live_app().await else {
             return;
         };
         let wikitext =

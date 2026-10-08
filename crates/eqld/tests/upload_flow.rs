@@ -160,6 +160,36 @@ async fn identical_content_is_uploaded_once() {
 }
 
 #[tokio::test]
+async fn a_same_second_rewrite_of_equal_length_still_uploads() {
+    let recorder = Recorder::new(201);
+    let addr = spawn_server(recorder.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    write_dump(&dir, SAMPLE);
+    let path = dir.path().join("Dorsk_erudin-Inventory.txt");
+    let first_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut daemon = harness(&dir, addr, "t");
+    assert_eq!(daemon.tick().await.uploaded, 1);
+
+    let swapped = SAMPLE.replace("Spirit Reaver", "Reaver Spirit");
+    assert_eq!(swapped.len(), SAMPLE.len());
+    write_dump(&dir, &swapped);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(first_mtime)
+        .unwrap();
+
+    assert_eq!(daemon.tick().await.uploaded, 1);
+    let requests = recorder.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].body["entries"][1]["name"], "Reaver Spirit");
+
+    assert_eq!(daemon.tick().await.uploaded, 0);
+    assert_eq!(recorder.count(), 2);
+}
+
+#[tokio::test]
 async fn changed_content_uploads_again() {
     let recorder = Recorder::new(201);
     let addr = spawn_server(recorder.clone()).await;

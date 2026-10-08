@@ -62,8 +62,8 @@ fn unpack_rgba(dds: &[u8]) -> Option<RgbaImage> {
 
     let level = dds.get(128..128 + width as usize * height as usize * 4)?;
     let mut image = RgbaImage::new(width, height);
-    for (pixel, chunk) in image.pixels_mut().zip(level.chunks_exact(4)) {
-        let packed = u32::from_le_bytes(chunk.try_into().ok()?);
+    for (pixel, chunk) in image.pixels_mut().zip(level.as_chunks::<4>().0) {
+        let packed = u32::from_le_bytes(*chunk);
         for (channel, mask) in pixel.0.iter_mut().zip(masks) {
             *channel = match mask {
                 0 => 255,
