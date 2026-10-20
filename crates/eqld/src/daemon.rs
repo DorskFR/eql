@@ -13,6 +13,7 @@ use eql_core::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -199,6 +200,7 @@ pub struct Daemon {
     next_install: Option<std::time::Instant>,
     last_skin_check: Option<std::time::Instant>,
     last_export_check: Option<std::time::Instant>,
+    last_locations: HashMap<String, Option<logs::LastLocation>>,
     diag: Option<Diag>,
     diag_note: Notice,
 }
@@ -302,6 +304,7 @@ impl Daemon {
             next_install: None,
             last_skin_check: None,
             last_export_check: None,
+            last_locations: HashMap::new(),
             diag: None,
             diag_note: Notice::new(),
         })
@@ -1393,17 +1396,20 @@ impl Daemon {
         }
         report.log_lines_dropped += harvest.dropped;
 
-        if !harvest.events.is_empty() {
+        let mut last_location = self.last_locations.get(&file_name).copied().flatten();
+        let events = logs::coalesce_locations(harvest.events, &mut last_location);
+        if !events.is_empty() {
             let batch = LogBatch {
                 character: character.clone(),
                 server: server.clone(),
-                events: harvest.events,
+                events,
             };
             let count = batch.events.len();
             tracing::info!(character = %character, server = %server, events = count, "uploading log events");
             match self.send(self.config.events_endpoint(), &batch).await {
                 Ok(status) if status.is_success() => {
                     report.log_events += count;
+                    self.last_locations.insert(file_name.clone(), last_location);
                     tracing::info!(character = %character, server = %server, events = count, "uploaded log events");
                 }
                 Ok(status) if status.is_server_error() => {

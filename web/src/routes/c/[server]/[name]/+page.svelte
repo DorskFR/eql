@@ -38,7 +38,7 @@
 		type ShareRow,
 		type ZoneRow
 	} from '$lib/harvest';
-	import { describeEvent, eventTone } from '$lib/events';
+	import { collapseLocations, describeEvent, eventTone } from '$lib/events';
 	import {
 		type AbilityRow,
 		categoryTone,
@@ -112,7 +112,7 @@
 	);
 	const loadoutHref = (key: string) => `?loadout=${encodeURIComponent(key)}`;
 
-	const eventRows = $derived(events.data?.pages.flat() ?? []);
+	const eventRows = $derived(collapseLocations(events.data?.pages.flat() ?? []));
 	const loggedLevel = $derived(
 		eventRows.reduce(
 			(max, event) => (event.kind === 'level' ? Math.max(max, event.payload.level ?? 0) : max),
