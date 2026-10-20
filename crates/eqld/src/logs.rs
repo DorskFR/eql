@@ -241,6 +241,60 @@ pub fn harvest(chunk: &[u8], character: &str) -> (Harvest, usize) {
     (harvest, consumed)
 }
 
+pub const LOCATION_INTERVAL_SECS: i64 = 300;
+pub const LOCATION_MIN_MOVE: f64 = 50.0;
+
+/// The last `/loc` shipped for a character; `None` after a zone change so
+/// the first position in the new zone always goes out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LastLocation {
+    pub at: i64,
+    pub y: f64,
+    pub x: f64,
+    pub z: f64,
+}
+
+/// A `/loc` line is worth shipping when the previous kept one is stale or far
+/// enough away; anything else is the same spot reported again.
+pub fn keep_location(prev: Option<&LastLocation>, event: &LogEvent) -> bool {
+    let LogEventKind::Location { y, x, z } = event.kind else {
+        return true;
+    };
+    let Some(prev) = prev else {
+        return true;
+    };
+    (event.at - prev.at).abs() >= LOCATION_INTERVAL_SECS
+        || ((y - prev.y).powi(2) + (x - prev.x).powi(2) + (z - prev.z).powi(2)).sqrt()
+            >= LOCATION_MIN_MOVE
+}
+
+/// Drops the location events `keep_location` rejects, carrying `last` across
+/// batches so the throttle survives tick boundaries.
+pub fn coalesce_locations(events: Vec<LogEvent>, last: &mut Option<LastLocation>) -> Vec<LogEvent> {
+    events
+        .into_iter()
+        .filter(|event| match event.kind {
+            LogEventKind::Zone { .. } => {
+                *last = None;
+                true
+            }
+            LogEventKind::Location { y, x, z } => {
+                let keep = keep_location(last.as_ref(), event);
+                if keep {
+                    *last = Some(LastLocation {
+                        at: event.at,
+                        y,
+                        x,
+                        z,
+                    });
+                }
+                keep
+            }
+            _ => true,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,5 +585,97 @@ mod tests {
         assert_eq!(harvest.events.len(), 1);
         assert_eq!(harvest.events[0].kind, LogEventKind::Death { killer: None });
         assert_eq!(harvest.dropped, 1);
+    }
+
+    fn at(secs: i64, y: f64, x: f64, z: f64) -> LogEvent {
+        LogEvent {
+            at: secs,
+            kind: LogEventKind::Location { y, x, z },
+        }
+    }
+
+    #[test]
+    fn keeps_a_location_only_when_stale_or_moved() {
+        let kept = LastLocation {
+            at: 1_000,
+            y: 100.0,
+            x: 200.0,
+            z: 10.0,
+        };
+        assert!(keep_location(None, &at(1_001, 100.0, 200.0, 10.0)));
+        assert!(!keep_location(Some(&kept), &at(1_001, 101.0, 199.0, 10.0)));
+        assert!(!keep_location(
+            Some(&kept),
+            &at(1_000 + LOCATION_INTERVAL_SECS - 1, 100.0, 200.0, 10.0)
+        ));
+        assert!(keep_location(
+            Some(&kept),
+            &at(1_000 + LOCATION_INTERVAL_SECS, 100.0, 200.0, 10.0)
+        ));
+        assert!(keep_location(
+            Some(&kept),
+            &at(1_001, 100.0 + LOCATION_MIN_MOVE, 200.0, 10.0)
+        ));
+        assert!(keep_location(
+            Some(&kept),
+            &at(1_001, 100.0, 200.0, 10.0 + LOCATION_MIN_MOVE)
+        ));
+        let level = LogEvent {
+            at: 1_001,
+            kind: LogEventKind::Level { level: 2 },
+        };
+        assert!(keep_location(Some(&kept), &level));
+    }
+
+    #[test]
+    fn coalesces_loc_spam_across_batches_and_resets_on_zone() {
+        let zone = LogEvent {
+            at: 1_010,
+            kind: LogEventKind::Zone {
+                zone: "Erudin".into(),
+            },
+        };
+        let loot = LogEvent {
+            at: 1_003,
+            kind: LogEventKind::Loot {
+                item: "Bone Chips".into(),
+            },
+        };
+        let mut last = None;
+        let first = coalesce_locations(
+            vec![
+                at(1_000, 0.0, 0.0, 0.0),
+                at(1_001, 1.0, 1.0, 0.0),
+                at(1_002, 2.0, 2.0, 0.0),
+                loot.clone(),
+                at(1_004, 3.0, 3.0, 0.0),
+            ],
+            &mut last,
+        );
+        assert_eq!(first, vec![at(1_000, 0.0, 0.0, 0.0), loot]);
+        assert_eq!(
+            last,
+            Some(LastLocation {
+                at: 1_000,
+                y: 0.0,
+                x: 0.0,
+                z: 0.0
+            })
+        );
+
+        let second = coalesce_locations(
+            vec![
+                at(1_005, 4.0, 4.0, 0.0),
+                zone.clone(),
+                at(1_011, 5.0, 5.0, 0.0),
+                at(1_012, 6.0, 6.0, 0.0),
+                at(1_400, 6.0, 6.0, 0.0),
+            ],
+            &mut last,
+        );
+        assert_eq!(
+            second,
+            vec![zone, at(1_011, 5.0, 5.0, 0.0), at(1_400, 6.0, 6.0, 0.0)]
+        );
     }
 }

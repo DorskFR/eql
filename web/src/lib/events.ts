@@ -41,3 +41,10 @@ export function describeEvent(event: LogEvent): string {
 			return event.kind;
 	}
 }
+
+/** Keeps only the newest row of each run of consecutive location rows. */
+export function collapseLocations<T extends { kind: string }>(rows: T[]): T[] {
+	return rows.filter(
+		(row, index) => row.kind !== 'location' || rows[index - 1]?.kind !== 'location'
+	);
+}
