@@ -1,7 +1,7 @@
 <script lang="ts">
 	import '@dorsk/tsumikit/styles/app.css';
 	import { QueryClient, QueryClientProvider } from '@tanstack/svelte-query';
-	import { Cluster, Container, Heading, Link, Stack, ThemePicker } from '@dorsk/tsumikit';
+	import { Cluster, Container, Heading, Link, Stack, THEME_PREPAINT, ThemePicker } from '@dorsk/tsumikit';
 
 	let { children } = $props();
 
@@ -19,6 +19,10 @@
 			.catch(() => {});
 	});
 </script>
+
+<svelte:head>
+	{@html `<script>${THEME_PREPAINT}</` + `script>`}
+</svelte:head>
 
 <QueryClientProvider client={queryClient}>
 	<Container pad>
