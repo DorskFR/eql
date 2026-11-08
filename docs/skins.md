@@ -2,6 +2,8 @@
 
 How eqld installs a layout designed in the web UI, how one UI is shared across resolutions, and how in-game changes are sent back. The `[skin]` keys are listed in [eqld.md](eqld.md#configuration).
 
+Creating and saving layouts in the designer needs the machine token. Installation happens only while the game is closed; `/loadskin <name>` is still typed by hand.
+
 ## Keeping the skin installed
 
 ```toml

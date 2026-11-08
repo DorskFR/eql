@@ -263,3 +263,9 @@ sheet the server refuses outright is parked (rerun with `--force` once the
 cause is fixed); a transport or 5xx failure is logged and retried by the next
 run, and neither stops the other sheets. This is a one-shot — the daemon loop
 never touches icons.
+
+## What eqld touches
+
+eqld reads the files the client writes (inventory dumps, chat logs). In the game folder it writes only the skin folder under `uifiles/` and the per-character ini files, backing each up first: the same files `/loadskin` and the in-game socials window change. It also installs and runs the third-party log reader in that tool's own directory. It does not touch the client binary, its memory or its network traffic.
+
+The repository contains no game art, textures or client binaries. Item icons only exist on a server after `upload-icons` sends them from a local install. The skin template (`crates/eqls/template/dorskui/` and its copy in `fixtures/equi/`) is a set of `EQUI_*.xml` window definitions edited from the client's stock UI files.
