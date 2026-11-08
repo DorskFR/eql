@@ -10,8 +10,6 @@ EverQuest Legends character profiles: a daemon on the game PC uploads gear, stat
   <img alt="eql profile page for a level 42 Shadow Knight: equipped items in a slot grid, vitals, attributes and resists summed from the gear, and tabs for best in slot, bags, bank, events, fights, atlas, quests and lifetime stats" src="docs/assets/profile-light.png" width="900">
 </picture>
 
-^ Fake seeded data, regenerated with `scripts/readme-screenshots.mjs`.
-
 Magelo-style. `eqld` uploads the client's dumps and logs; `eqls` stores them in Postgres, joins a fan-wiki item database and serves the UI. Unofficial, see [Trademarks](#license-and-trademarks).
 
 ## Features
