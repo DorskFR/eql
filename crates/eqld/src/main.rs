@@ -18,18 +18,25 @@ const SUBCOMMANDS: &[&str] = &[
 struct Invocation {
     path: PathBuf,
     force: bool,
+    headless: bool,
     rest: Vec<String>,
 }
 
-/// `eqld [config.toml] [--force] [subcommand [args…]]` — the optional leading
+/// `eqld [config.toml] [--force] [--headless] [subcommand [args…]]` — the optional leading
 /// config path is anything that is not a subcommand name or a global flag.
 fn split_args(args: Vec<String>) -> Invocation {
     let mut path = None;
     let mut force = false;
+    let mut headless = false;
     let mut iter = args.into_iter().peekable();
     while let Some(arg) = iter.peek() {
         if arg == "--force" {
             force = true;
+            iter.next();
+            continue;
+        }
+        if arg == "--headless" {
+            headless = true;
             iter.next();
             continue;
         }
@@ -41,14 +48,21 @@ fn split_args(args: Vec<String>) -> Invocation {
     Invocation {
         path: path.unwrap_or_else(|| PathBuf::from("eqld.toml")),
         force,
+        headless,
         rest: iter.collect(),
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let Invocation { path, force, rest } = split_args(std::env::args().skip(1).collect());
+    let Invocation {
+        path,
+        force,
+        headless,
+        rest,
+    } = split_args(std::env::args().skip(1).collect());
     let config = Config::load(&path)?;
+    let config = if headless { config.headless() } else { config };
 
     let buffer = std::sync::Arc::new(diag::Buffer::new(diag::CAPACITY));
     let session = diag::session_id();
@@ -104,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         overlays = ?daemon.overlays(),
         hidden = ?daemon.hidden_overlays(),
         headless = ?daemon.headless_overlays(),
+        headless_mode = daemon.config().headless,
         config = %path.display(),
         game_process = daemon.config().game_process().unwrap_or("undetectable"),
         skin = ?daemon.config().skin.wanted(),
@@ -158,6 +173,15 @@ mod tests {
         assert_eq!(sub.path, PathBuf::from("eqld.toml"));
         assert!(!sub.force);
         assert_eq!(sub.rest, ["install-skin", "dorskui", "--skin", "v4"]);
+
+        let headless = split(&["/data/eqld/eqld.toml", "--headless"]);
+        assert!(headless.headless && !headless.force);
+        assert_eq!(headless.path, PathBuf::from("/data/eqld/eqld.toml"));
+        assert!(!bare.headless && !daemon.headless && !sub.headless);
+        assert!(
+            !split(&["install-skin", "--headless"]).headless,
+            "a flag after the subcommand belongs to the subcommand"
+        );
 
         let icons = split(&["upload-icons", "--force"]);
         assert_eq!(icons.path, PathBuf::from("eqld.toml"));

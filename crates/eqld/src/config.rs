@@ -17,6 +17,8 @@ pub struct Config {
     pub skin: SkinConfig,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(skip)]
+    pub headless: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,7 +253,34 @@ fn default_game_process() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     pub url: String,
+    #[serde(default)]
     pub token: String,
+    /// The environment variable holding the token, so the file can stay free of it.
+    pub token_env: Option<String>,
+}
+
+impl ApiConfig {
+    fn resolve(&mut self, env: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+        let named = self
+            .token_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty());
+        match (named, self.token.trim().is_empty()) {
+            (Some(_), false) => Err("set api.token or api.token_env, not both".into()),
+            (None, true) => Err("api.token or api.token_env is required".into()),
+            (None, false) => Ok(()),
+            (Some(name), true) => {
+                let value = env(name)
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty());
+                self.token = value.ok_or_else(|| {
+                    format!("api.token_env names {name}, which is unset or empty")
+                })?;
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -274,7 +303,35 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path)
             .map_err(|source| ConfigError::Read(path.to_path_buf(), source))?;
-        toml::from_str(&text).map_err(|source| ConfigError::Parse(path.to_path_buf(), source))
+        Self::parse(path, &text, |name| std::env::var(name).ok())
+    }
+
+    fn parse(
+        path: &Path,
+        text: &str,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        let mut config: Config = toml::from_str(text)
+            .map_err(|source| ConfigError::Parse(path.to_path_buf(), source))?;
+        config
+            .api
+            .resolve(env)
+            .map_err(|why| ConfigError::Token(path.to_path_buf(), why))?;
+        Ok(config)
+    }
+
+    /// Never opens a window and never writes into the game root, whatever the
+    /// file asks for now or after an edit: for a daemon sharing the bot's desktop.
+    pub fn headless(mut self) -> Self {
+        self.headless = true;
+        let reader = &mut self.tools.log_reader;
+        reader.overlays.clear();
+        reader.hidden.clear();
+        reader.atlas = AtlasMode::Replay;
+        self.socials.enabled = false;
+        self.skin.enabled = false;
+        self.skin.export = false;
+        self
     }
 
     pub fn poll_interval(&self) -> std::time::Duration {
@@ -367,7 +424,7 @@ impl Config {
 
     /// Keeps every frozen field of `self`, takes the rest from `next`.
     pub fn hot_swap(&self, next: Config) -> Config {
-        Config {
+        let swapped = Config {
             game: GameConfig {
                 root: self.game.root.clone(),
                 poll_secs: self.game.poll_secs,
@@ -385,6 +442,12 @@ impl Config {
                 upload: next.log.upload,
                 device: next.log.device,
             },
+            headless: false,
+        };
+        if self.headless {
+            swapped.headless()
+        } else {
+            swapped
         }
     }
 }
@@ -432,7 +495,9 @@ impl Watch {
                 )));
             }
         };
-        Some(toml::from_str(&text).map_err(|source| ConfigError::Parse(self.path.clone(), source)))
+        Some(Config::parse(&self.path, &text, |name| {
+            std::env::var(name).ok()
+        }))
     }
 }
 
@@ -449,6 +514,8 @@ pub enum ConfigError {
     Read(PathBuf, #[source] std::io::Error),
     #[error("parsing {0}: {1}")]
     Parse(PathBuf, #[source] toml::de::Error),
+    #[error("{0}: {1}")]
+    Token(PathBuf, String),
 }
 
 #[cfg(test)]
@@ -1246,5 +1313,112 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.poll_interval().as_secs(), 1);
+    }
+
+    fn parsed(api: &str, env: &[(&str, &str)]) -> Result<Config, ConfigError> {
+        let text =
+            format!("[game]\nroot = \"/games/eq\"\n[api]\nurl = \"http://eqls:8080\"\n{api}\n");
+        Config::parse(Path::new("eqld.toml"), &text, |name| {
+            env.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    #[test]
+    fn the_token_can_come_from_a_named_environment_variable_instead_of_the_file() {
+        let from_env = parsed(
+            r#"token_env = "EQLS_MACHINE_TOKEN""#,
+            &[("EQLS_MACHINE_TOKEN", "s3cret")],
+        )
+        .unwrap();
+        assert_eq!(from_env.api.token, "s3cret");
+        assert_eq!(
+            parsed(r#"token = "inline""#, &[]).unwrap().api.token,
+            "inline"
+        );
+
+        for (api, env, says) in [
+            (
+                r#"token_env = "EQLS_MACHINE_TOKEN""#,
+                &[][..],
+                "EQLS_MACHINE_TOKEN",
+            ),
+            (
+                r#"token_env = "EQLS_MACHINE_TOKEN""#,
+                &[("EQLS_MACHINE_TOKEN", " ")][..],
+                "EQLS_MACHINE_TOKEN",
+            ),
+            (
+                "token = \"inline\"\ntoken_env = \"EQLS_MACHINE_TOKEN\"",
+                &[("EQLS_MACHINE_TOKEN", "s3cret")][..],
+                "not both",
+            ),
+            ("", &[][..], "api.token"),
+        ] {
+            let err = parsed(api, env).unwrap_err();
+            assert!(matches!(err, ConfigError::Token(..)), "{api}: {err}");
+            assert!(err.to_string().contains(says), "{api}: {err}");
+            assert!(
+                !err.to_string().contains("s3cret"),
+                "the token never lands in an error"
+            );
+        }
+    }
+
+    #[test]
+    fn a_headless_config_drops_every_overlay_and_game_root_write_even_after_an_edit() {
+        let asks_for_everything = |token: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [game]
+                root = "/games/eq"
+                [api]
+                url = "https://a"
+                token = "{token}"
+                [socials]
+                enabled = true
+                [skin]
+                enabled = true
+                export = true
+                layout = "dorskui"
+                [tools.log_reader]
+                enabled = true
+                overlays = ["dps", "friend", "session_report", "atlas"]
+                hidden = ["dps"]
+                atlas = "overlay"
+                "#
+            ))
+            .unwrap()
+        };
+        let stripped = |config: &Config| {
+            let reader = &config.tools.log_reader;
+            assert!(config.headless);
+            assert!(reader.overlays.is_empty() && reader.hidden.is_empty());
+            assert_eq!(reader.atlas, AtlasMode::Replay);
+            assert!(
+                reader.enabled,
+                "the windowless replay and fights tools still run"
+            );
+            assert!(!config.socials.enabled);
+            assert!(!config.skin.enabled && !config.skin.export);
+            assert!(crate::overlays::plan(reader).wanted.is_empty());
+        };
+
+        let headless = asks_for_everything("t").headless();
+        stripped(&headless);
+        stripped(&headless.hot_swap(asks_for_everything("u")));
+
+        let windowed = asks_for_everything("t");
+        assert!(!windowed.headless);
+        assert_eq!(
+            windowed
+                .hot_swap(asks_for_everything("u"))
+                .tools
+                .log_reader
+                .overlays
+                .len(),
+            4
+        );
     }
 }
