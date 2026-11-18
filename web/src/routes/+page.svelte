@@ -13,8 +13,8 @@
 		Timestamp,
 		type Column
 	} from '@dorsk/tsumikit';
-	import type { CharacterSummary } from '$lib/api';
-	import { useCharacters } from '$lib/queries';
+	import type { CharacterSummary } from '#lib/api.ts';
+	import { useCharacters } from '#lib/queries.ts';
 
 	const characters = useCharacters();
 

@@ -14,9 +14,9 @@
 		Stack,
 		Text
 	} from '@dorsk/tsumikit';
-	import { bundleUrl, endpoints, type LayoutStyle, type Rect } from '$lib/api';
-	import { clamp, GRID, snap, tokenStore, validate } from '$lib/layout';
-	import { useLayout } from '$lib/queries';
+	import { bundleUrl, endpoints, type LayoutStyle, type Rect } from '#lib/api.ts';
+	import { clamp, GRID, snap, tokenStore, validate } from '#lib/layout.ts';
+	import { useLayout } from '#lib/queries.ts';
 
 	const name = $derived(page.params.name ?? '');
 	const query = useLayout(() => name);

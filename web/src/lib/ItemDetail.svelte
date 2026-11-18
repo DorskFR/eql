@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { Timestamp } from '@dorsk/tsumikit';
-	import type { ItemStats } from '$lib/api';
-	import { ATTRIBUTES, iconUrl, itemPath, flags, ratio, RESISTS, wikiUrl } from '$lib/items';
-	import { useItem } from '$lib/queries';
+	import type { ItemStats } from '#lib/api.ts';
+	import { ATTRIBUTES, iconUrl, itemPath, flags, ratio, RESISTS, wikiUrl } from '#lib/items.ts';
+	import { useItem } from '#lib/queries.ts';
 
 	let { key, pageLink = false }: { key: string; pageLink?: boolean } = $props();
 
