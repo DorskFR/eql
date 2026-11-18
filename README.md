@@ -136,6 +136,8 @@ Full reference: [docs/eqld.md](docs/eqld.md). eqls variables: [docs/development.
 |---|---|---|
 | `game.root` | required | The game folder, the one holding `eqgame.exe` |
 | `api.url`, `api.token` | required | eqls base URL and its machine token |
+| `api.token_env` | none | Read the token from this environment variable instead |
+| `--headless` (flag) | off | No overlay, social or skin, whatever the config says: for a desktop a bot reads |
 | `game.poll_secs` | `5` | Seconds between scans of the game folder |
 | `socials.enabled` | `false` | Keep the `EQLD` button applied after each session |
 | `skin.enabled`, `skin.layout` | `false`, none | Keep a layout from the server installed |

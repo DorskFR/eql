@@ -420,6 +420,57 @@ async fn overlays_are_toggled_by_editing_the_config_while_the_daemon_runs() {
 }
 
 #[tokio::test]
+async fn a_headless_daemon_launches_no_overlay_even_when_an_edit_asks_for_one() {
+    let _game = GAME.lock().await;
+    let root = TempDir::new().unwrap();
+    let tools = TempDir::new().unwrap();
+    game_log(&root);
+    let launched = tools.path().join("launched");
+    install(&tools, "eql_atlas", "exit 0");
+    for name in ["eql_dps_meter", "eql_friend_overlay", "eql_session_report"] {
+        install(
+            &tools,
+            name,
+            &format!("echo {name} >> {}\nexec sleep 120", launched.display()),
+        );
+    }
+
+    let config = root.path().join("eqld.toml");
+    let write = |overlays: &str| {
+        std::fs::write(
+            &config,
+            text(root.path(), tools.path(), overlays, false, ""),
+        )
+        .unwrap()
+    };
+    write("\"dps\"");
+
+    let mut daemon = Daemon::new(Config::load(&config).unwrap().headless())
+        .unwrap()
+        .watching(config.clone());
+    let mut game = fake_game(&tools);
+    settle().await;
+    daemon.tick().await;
+    settle().await;
+    assert!(daemon.overlays().is_empty());
+
+    write("\"dps\", \"friend\", \"session_report\"");
+    daemon.tick().await;
+    settle().await;
+    assert!(daemon.overlays().is_empty());
+    assert!(daemon.config().headless);
+    assert!(
+        !launched.exists(),
+        "launched: {:?}",
+        std::fs::read_to_string(&launched)
+    );
+
+    daemon.shutdown().await;
+    game.kill().unwrap();
+    game.wait().unwrap();
+}
+
+#[tokio::test]
 async fn a_broken_config_edit_leaves_the_daemon_on_the_last_good_one() {
     let _game = GAME.lock().await;
     let root = TempDir::new().unwrap();

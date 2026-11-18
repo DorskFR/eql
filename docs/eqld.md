@@ -51,6 +51,7 @@ And outside `[tools.log_reader]`:
 | `game.root` | required | The game folder, the one holding `eqgame.exe`. |
 | `game.poll_secs` | `5` | Seconds between scans of the game folder. |
 | `api.url`, `api.token` | required | The eqls base URL and its `EQLS_MACHINE_TOKEN`. |
+| `api.token_env` | — | Instead of `api.token`: the environment variable holding it (one or the other). |
 | `state.path` | `<state dir>/eqld/state.json` | Where eqld remembers what it has already uploaded. |
 | `game.process` | `eqgame.exe` | The client's name in the process list. Set it to `""` to say it cannot be seen at all. |
 | `socials.bar` | `1` | Hotbar the EQLD button is placed on, 1-10. `0` installs the social but touches no bar. |
@@ -77,7 +78,7 @@ listed and still healthy is left alone rather than restarted.
 | everything under `[socials]`: `enabled`, `bar`, `page` | |
 | everything under `[skin]` | |
 | `game.process` | |
-| | `api.url`, `api.token` |
+| | `api.url`, `api.token`, `api.token_env` |
 | | `state.path` |
 
 A restart-only field that changed is logged as such and the running value is
@@ -106,6 +107,15 @@ wrong. This is a plain file, not a Windows named mutex, so it behaves the same
 under Wine, Winlator, macOS and Termux.
 
 The subcommands are one-shots and are not locked; only the daemon loop is.
+
+## Headless, beside a bot
+
+`eqld <config> --headless` is for a game desktop something else is reading: it
+never opens a window and never writes into the game folder. Overlays (`overlays`,
+`hidden`, `atlas = "overlay"`), the social and the skin and its export are
+switched off whatever the file says, now or after an edit. The windowless
+`--replay` harvest and the fights tool still run when `tools.log_reader.enabled`
+is on. The flag needs a restart to take off.
 
 ## Log colour
 
