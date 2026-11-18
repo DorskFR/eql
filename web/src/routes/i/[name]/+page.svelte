@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import ItemDetail from '$lib/ItemDetail.svelte';
+	import ItemDetail from '#lib/ItemDetail.svelte';
 
 	const key = $derived(page.params.name ?? '');
 </script>

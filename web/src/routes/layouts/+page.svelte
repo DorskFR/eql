@@ -17,9 +17,9 @@
 		Timestamp,
 		type Column
 	} from '@dorsk/tsumikit';
-	import { endpoints, type LayoutSummary } from '$lib/api';
-	import { tokenStore } from '$lib/layout';
-	import { useLayouts } from '$lib/queries';
+	import { endpoints, type LayoutSummary } from '#lib/api.ts';
+	import { tokenStore } from '#lib/layout.ts';
+	import { useLayouts } from '#lib/queries.ts';
 
 	const layouts = useLayouts();
 

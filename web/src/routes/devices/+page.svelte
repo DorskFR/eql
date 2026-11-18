@@ -12,8 +12,8 @@
 		Stack,
 		Text
 	} from '@dorsk/tsumikit';
-	import { endpoints, type DeviceSummary, type SessionLog, type SessionSummary } from '$lib/api';
-	import { tokenStore } from '$lib/layout';
+	import { endpoints, type DeviceSummary, type SessionLog, type SessionSummary } from '#lib/api.ts';
+	import { tokenStore } from '#lib/layout.ts';
 
 	let token = $state(tokenStore.load());
 	let devices = $state<DeviceSummary[]>([]);

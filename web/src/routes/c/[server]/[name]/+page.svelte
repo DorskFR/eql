@@ -23,7 +23,7 @@
 		type Column,
 		type TabItem
 	} from '@dorsk/tsumikit';
-	import type { InventoryEntry, ItemClasses, ItemStats, LogEvent, WeaponSummary } from '$lib/api';
+	import type { InventoryEntry, ItemClasses, ItemStats, LogEvent, WeaponSummary } from '#lib/api.ts';
 	import {
 		type BuildRow,
 		coin,
@@ -37,8 +37,8 @@
 		rawJson,
 		type ShareRow,
 		type ZoneRow
-	} from '$lib/harvest';
-	import { collapseLocations, describeEvent, eventTone } from '$lib/events';
+	} from '#lib/harvest.ts';
+	import { collapseLocations, describeEvent, eventTone } from '#lib/events.ts';
 	import {
 		type AbilityRow,
 		categoryTone,
@@ -46,9 +46,9 @@
 		enemyList,
 		type FightRow,
 		projectFights
-	} from '$lib/fights';
-	import ItemDetail from '$lib/ItemDetail.svelte';
-	import { bags, filled, groupEntries, paperdoll } from '$lib/inventory';
+	} from '#lib/fights.ts';
+	import ItemDetail from '#lib/ItemDetail.svelte';
+	import { bags, filled, groupEntries, paperdoll } from '#lib/inventory.ts';
 	import {
 		ATTRIBUTES,
 		attributeTotals,
@@ -61,7 +61,7 @@
 		type StatRow,
 		weaponDamageDelay,
 		weaponRatio
-	} from '$lib/items';
+	} from '#lib/items.ts';
 	import {
 		useBis,
 		useCharacter,
@@ -70,7 +70,7 @@
 		useHarvest,
 		useInventory,
 		useStats
-	} from '$lib/queries';
+	} from '#lib/queries.ts';
 
 	const server = $derived(page.params.server ?? '');
 	const name = $derived(page.params.name ?? '');
