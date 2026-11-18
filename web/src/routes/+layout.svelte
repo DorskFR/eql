@@ -1,6 +1,8 @@
 <script lang="ts">
 	import '@dorsk/tsumikit/styles/app.css';
 	import { QueryClient, QueryClientProvider } from '@tanstack/svelte-query';
+	import { page } from '$app/state';
+	import { Hmm } from '@dorsk/hmm';
 	import { Cluster, Container, Heading, Link, Stack, THEME_PREPAINT, ThemePicker } from '@dorsk/tsumikit';
 
 	let { children } = $props();
@@ -48,6 +50,12 @@
 		</Stack>
 	</Container>
 </QueryClientProvider>
+<Hmm
+	projectKey="eql"
+	endpoint="https://hmm.dorsk.dev"
+	launcher={{ form: 'edge', side: 'right', align: 'center' }}
+	context={() => ({ route: page.url.pathname, appVersion: serverVersion })}
+/>
 
 <style>
 	.version {
