@@ -68,6 +68,29 @@ pub fn newer_than(fights: Vec<Value>, watermark: Option<i64>) -> Vec<Value> {
     fights
 }
 
+/// eqls reads at most 2 MB of JSON per request; a long log's first dump is
+/// several times that.
+pub const MAX_BATCH_BYTES: usize = 1024 * 1024;
+
+/// Consecutive runs of `fights`, each serialising under `max_bytes` unless a
+/// single fight is larger on its own.
+pub fn batches(fights: &[Value], max_bytes: usize) -> Vec<&[Value]> {
+    let mut out = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (at, fight) in fights.iter().enumerate() {
+        let size = serde_json::to_vec(fight).map_or(0, |json| json.len()) + 1;
+        if at > start && bytes + size > max_bytes {
+            out.push(&fights[start..at]);
+            (start, bytes) = (at, 0);
+        }
+        bytes += size;
+    }
+    if start < fights.len() {
+        out.push(&fights[start..]);
+    }
+    out
+}
+
 pub fn newest(fights: &[Value]) -> Option<i64> {
     fights.iter().filter_map(start_wall_ms).max()
 }
@@ -129,6 +152,30 @@ mod tests {
         assert_eq!(newest(&new), Some(300_000));
         assert!(newer_than(fights, Some(300_000)).is_empty());
         assert_eq!(newest(&[]), None);
+    }
+
+    #[test]
+    fn batches_split_in_order_under_the_budget() {
+        let fights: Vec<Value> = (0..10).map(|n| fight(f64::from(n))).collect();
+        let one = serde_json::to_vec(&fights[0]).unwrap().len() + 1;
+
+        let split = batches(&fights, one * 4);
+        assert_eq!(
+            split.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+            vec![4, 4, 2]
+        );
+        assert_eq!(split.concat(), fights, "nothing lost, nothing reordered");
+
+        assert_eq!(batches(&fights, usize::MAX).len(), 1);
+        assert!(batches(&[], one).is_empty());
+        assert_eq!(
+            batches(&fights[..3], 1)
+                .iter()
+                .map(|batch| batch.len())
+                .collect::<Vec<_>>(),
+            vec![1, 1, 1],
+            "a fight over the budget still travels, alone"
+        );
     }
 
     #[test]

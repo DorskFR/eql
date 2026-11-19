@@ -91,6 +91,27 @@ fn the_fights_tool_listens_for_fights_instead_of_reading_the_history() {
     );
 }
 
+/// A log with no channel setup line is rescanned on every replay; read whole,
+/// a 500 MB log costs a gigabyte of memory each time.
+#[test]
+fn the_channel_scan_reads_the_log_a_chunk_at_a_time() {
+    let patch = read("headless.patch");
+    assert!(patch.contains("-            data = f.read().decode(\"cp1252\", \"replace\")"));
+    assert!(patch.contains("+                chunk = f.read(1 << 20)"));
+    assert!(patch.contains("+                tail = window[-4096:]"));
+}
+
+/// The replay credits quests through `QuestDB`/`QuestState`, which need no
+/// window; a top-level tkinter import would switch that off, silently, on a
+/// Python without tk such as eqld's image.
+#[test]
+fn quest_credit_does_not_need_tkinter() {
+    let patch = read("headless.patch");
+    assert!(patch.contains(
+        "-import tkinter as tk\n-from tkinter import font as tkfont\n+try:\n+    import tkinter as tk\n+    from tkinter import font as tkfont\n+except ImportError:\n+    tk = tkfont = None\n"
+    ));
+}
+
 /// A tool the patch adds but `apply.sh` does not assert on would go missing on
 /// an upstream bump without anything failing.
 #[test]

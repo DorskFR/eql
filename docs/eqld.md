@@ -117,6 +117,23 @@ switched off whatever the file says, now or after an edit. The windowless
 `--replay` harvest and the fights tool still run when `tools.log_reader.enabled`
 is on. The flag needs a restart to take off.
 
+The `ghcr.io/dorskfr/eqld` image carries the patched log reader, read-only, in
+`/opt/eql-log-reader`, and the `python3` it runs on (no tk: nothing in it can
+draw). Point eqld at it rather than letting it download one, and give the
+reader somewhere writable for its database, which is also where eqld harvests:
+
+```toml
+[tools.log_reader]
+enabled = true
+exe = "/opt/eql-log-reader/eql_atlas.py"
+auto_install = false
+```
+
+```yaml
+env:
+  - {name: XDG_DATA_HOME, value: /data/eqld/share}   # Atlas DB, quests: <this>/eql-log-reader
+```
+
 ## Log colour
 
 ```toml

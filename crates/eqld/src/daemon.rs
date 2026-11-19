@@ -617,9 +617,15 @@ impl Daemon {
             if new.is_empty() {
                 continue;
             }
-            dirty |= self
-                .send_fights(&character, &server, key, &new, report)
-                .await;
+            for batch in fights::batches(&new, fights::MAX_BATCH_BYTES) {
+                let sent = self
+                    .send_fights(&character, &server, key.clone(), batch, report)
+                    .await;
+                dirty |= sent;
+                if !sent {
+                    break;
+                }
+            }
         }
         dirty
     }

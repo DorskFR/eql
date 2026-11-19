@@ -2834,6 +2834,26 @@ mod tests {
         }
     }
 
+    /// eqld batches its first upload of a long log's history to stay under this.
+    #[tokio::test]
+    async fn a_fights_body_over_two_megabytes_is_refused_unread() {
+        let batch = |bytes: usize| {
+            let fight = r#"{"start_wall":"x"},"#;
+            let mut fights = fight.repeat(bytes / fight.len());
+            fights.pop();
+            fights_body(&format!("[{fights}]"))
+        };
+        assert_eq!(
+            status_of(post_fights(Some("s3cret"), &batch(1024 * 1024))).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "eqld's 1 MiB batch is read"
+        );
+        assert_eq!(
+            status_of(post_fights(Some("s3cret"), &batch(3 * 1024 * 1024))).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
     #[tokio::test]
     async fn an_unparsable_fight_cursor_is_rejected() {
         let request = Request::builder()
