@@ -1,22 +1,39 @@
 diff --git a/eql_atlas.py b/eql_atlas.py
-index aaae642..208d0d0 100644
+index aaae642..6ef2271 100644
 --- a/eql_atlas.py
 +++ b/eql_atlas.py
-@@ -1575,21 +1575,54 @@ _RE_CH_ANY = re.compile(
+@@ -690,6 +690,7 @@ class AtlasDB:
+                                "coin_copper": 0}
+         self.data["zones"] = {}
+         self.data["log_pos"] = {}
++        self.data["channel_scan"] = {}
+         self.dirty = True
+ 
+     # -- recording ----------------------------------------------------------
+@@ -1575,21 +1576,67 @@ _RE_CH_ANY = re.compile(
  def learn_channel_from_log(log_path, tracker):
      """Fallback channel discovery: the setup lines ('Set channels to be
      joined at login: ...') may sit in log territory that's already been
 -    ingested and will never be re-read. Scans the WHOLE log (one regex
 -    pass, well under a second) for the most recent one -- and only ever
 -    runs while no channel is known, i.e. at most once per character."""
-+    ingested and will never be re-read. Scans the WHOLE log for the most
-+    recent one, whenever no channel is known -- every replay, for a log
-+    that has none -- so it reads a chunk at a time, overlapping each by more
-+    than a setup line so none is split."""
++    ingested and will never be re-read. Scans the log for the most recent
++    one whenever no channel is known, a chunk at a time, overlapping each by
++    more than a setup line so none is split. A scan that found nothing
++    leaves its end in the DB, and the next one starts there: for a log with
++    no setup line that is every replay. A log shorter than that is scanned
++    from the start."""
 +    last = None
++    db = getattr(tracker, "db", None)
++    scanned = db.data.setdefault("channel_scan", {}) if db is not None else {}
++    key = os.path.abspath(log_path).lower()
      try:
          with open(log_path, "rb") as f:
 -            data = f.read().decode("cp1252", "replace")
++            start = scanned.get(key, 0)
++            if start > os.fstat(f.fileno()).st_size:
++                start = 0
++            f.seek(max(0, start - 4096))
 +            tail = b""
 +            while True:
 +                chunk = f.read(1 << 20)
@@ -26,11 +43,15 @@ index aaae642..208d0d0 100644
 +                for m in _RE_CH_ANY.finditer(window.decode("cp1252", "replace")):
 +                    last = m.group(1)
 +                tail = window[-4096:]
++            end = f.tell()
      except OSError:
          return
 -    last = None
 -    for m in _RE_CH_ANY.finditer(data):
 -        last = m.group(1)
++    if db is not None and scanned.get(key) != end:
++        scanned[key] = end
++        db.dirty = True
      if last:
          tracker._learn_channel(last)
  
@@ -64,7 +85,7 @@ index aaae642..208d0d0 100644
  def replay(log_path):
      char, server = char_server_from(log_path)
      baseline = Baseline()
-@@ -1605,6 +1638,7 @@ def replay(log_path):
+@@ -1605,6 +1652,7 @@ def replay(log_path):
          pass
      tracker = AtlasTracker(db, baseline, session_from=float("inf"),
                             command_channel=db.data.get("command_channel", ""))
@@ -72,7 +93,7 @@ index aaae642..208d0d0 100644
      t0 = time.time()
      start = db.log_pos(log_path) or 0
      end = ingest(log_path, tracker, start)
-@@ -1612,6 +1646,15 @@ def replay(log_path):
+@@ -1612,6 +1660,15 @@ def replay(log_path):
      if not tracker.cmd_channel:
          learn_channel_from_log(log_path, tracker)
      db.save()
@@ -88,7 +109,7 @@ index aaae642..208d0d0 100644
  
      tot = db.data["totals"]
      print(f"replayed {end - start:,} bytes in {time.time() - t0:.1f}s "
-@@ -2871,6 +2914,15 @@ def main():
+@@ -2871,6 +2928,15 @@ def main():
              raise SystemExit("usage: python eql_atlas.py --replay <eqlog file>")
          replay(args[1])
          return
@@ -126,10 +147,10 @@ index e061fcb..2fa135d 100644
              s = Settings(SETTINGS_FILE)
 diff --git a/eql_fights_cli.py b/eql_fights_cli.py
 new file mode 100644
-index 0000000..c381eaa
+index 0000000..b270c2c
 --- /dev/null
 +++ b/eql_fights_cli.py
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,264 @@
 +#!/usr/bin/env python3
 +"""
 +EQL Fights CLI
@@ -138,7 +159,7 @@ index 0000000..c381eaa
 +the DPS meter and the Session Report's Encounters tab run on.
 +
 +    python eql_fights_cli.py <eqlog file> [--out PATH] [--since UNIX]
-+                             [--indent N] [--quiet]
++                             [--state PATH] [--indent N] [--quiet]
 +
 +Output is `{"character","server","log","fights":[...]}`; without --out it
 +goes to stdout. Each fight carries the tracker's own numbers plus the zone
@@ -155,16 +176,29 @@ index 0000000..c381eaa
 +be emitted again, with different numbers and the same start_wall, on the
 +next run. maybe_timeout() closes it once real time has moved past the idle
 +timeout, which is the same rule the live overlay applies.
++
++--state PATH keeps the tracker as it stood after the last complete line,
++with the fights after --since, so the next run reads only what the log has
++gained since. The output is the same as reading the whole log: a log that
++shrank or changed under the checkpoint, a --since older than the one the
++checkpoint was cut at, or another build of the tracker is a full read.
 +"""
 +
++import hashlib
 +import json
 +import os
++import pickle
 +import re
 +import sys
 +from datetime import datetime
 +
++import eql_combat_tracker
++import eql_spell_db
 +from eql_combat_tracker import CombatTracker, LOG_TS_FMT, TS_RE
 +from eql_spell_db import SPELL_DB
++
++CHECKPOINT_FORMAT = 1
++FINGERPRINT = 4096
 +
 +ZONE_RE = re.compile(TS_RE + r"You have entered (?P<zone>.+)\.\s*$")
 +NAME_RE = re.compile(r"eqlog_(?P<character>.+)_(?P<server>[^_]+)\.txt$", re.I)
@@ -230,27 +264,92 @@ index 0000000..c381eaa
 +    }
 +
 +
-+def collect(log_path, since=None):
++def _code_id():
++    digest = hashlib.sha256(str(CHECKPOINT_FORMAT).encode())
++    if getattr(sys, "frozen", False):
++        st = os.stat(sys.executable)
++        digest.update(f"{sys.executable}:{st.st_size}:{st.st_mtime_ns}".encode())
++        return digest.hexdigest()
++    for module in (sys.modules[__name__], eql_combat_tracker, eql_spell_db):
++        with open(module.__file__, "rb") as fh:
++            digest.update(fh.read())
++    return digest.hexdigest()
++
++
++def _fingerprint(fh, offset):
++    fh.seek(0)
++    head = fh.read(min(offset, FINGERPRINT))
++    fh.seek(max(0, offset - FINGERPRINT))
++    tail = fh.read(offset - max(0, offset - FINGERPRINT))
++    return head, tail
++
++
++def _resume(state, fh, since):
++    try:
++        with open(state, "rb") as sf:
++            ckpt = pickle.load(sf)
++        if ckpt["code"] != _code_id():
++            return None
++        if ckpt["floor"] is not None and (since is None or since < ckpt["floor"]):
++            return None
++        offset = ckpt["offset"]
++        if os.fstat(fh.fileno()).st_size < offset:
++            return None
++        if _fingerprint(fh, offset) != ckpt["fingerprint"]:
++            return None
++        return ckpt
++    except Exception:
++        return None
++
++
++def _save(state, fh, offset, tracker, zones, fights, since):
++    listeners, tracker.fight_listeners = tracker.fight_listeners, []
++    try:
++        ckpt = {"code": _code_id(), "offset": offset,
++                "fingerprint": _fingerprint(fh, offset), "floor": since,
++                "tracker": tracker, "zones": zones,
++                "fights": [f for f in fights
++                           if since is None or f["start_wall"] > since]}
++        directory = os.path.dirname(os.path.abspath(state))
++        if directory:
++            os.makedirs(directory, exist_ok=True)
++        tmp = state + ".tmp"
++        with open(tmp, "wb") as sf:
++            pickle.dump(ckpt, sf, protocol=pickle.HIGHEST_PROTOCOL)
++        os.replace(tmp, state)
++    finally:
++        tracker.fight_listeners = listeners
++
++
++def collect(log_path, since=None, state=None):
 +    character, server = char_server(log_path)
 +    SPELL_DB.set_game_dir_hint(
 +        os.path.dirname(os.path.dirname(os.path.abspath(log_path))))
-+    tracker = CombatTracker(self_name=character)
-+    zones = Zones()
-+    fights = []
-+    tracker.fight_listeners.append(
-+        lambda fight: fights.append(as_record(fight, zones.at(fight.start_wall))))
-+    # eql_atlas.ingest's decoding, and it leaves a half-written trailing line
-+    buf = b""
 +    with open(log_path, "rb") as fh:
++        ckpt = _resume(state, fh, since) if state else None
++        if ckpt:
++            tracker, zones, fights = ckpt["tracker"], ckpt["zones"], ckpt["fights"]
++            offset = ckpt["offset"]
++        else:
++            tracker = CombatTracker(self_name=character)
++            zones, fights, offset = Zones(), [], 0
++        tracker.fight_listeners.append(
++            lambda fight: fights.append(as_record(fight, zones.at(fight.start_wall))))
++        # eql_atlas.ingest's decoding, and it leaves a half-written trailing line
++        fh.seek(offset)
++        buf = b""
 +        while True:
 +            chunk = fh.read(1 << 20)
 +            if not chunk:
 +                break
++            offset += len(chunk)
 +            *lines, buf = (buf + chunk).split(b"\n")
 +            for raw in lines:
 +                line = raw.decode("cp1252", "replace").rstrip("\r")
 +                zones.feed(line)
 +                tracker.handle_line(line)
++        if state:
++            _save(state, fh, offset - len(buf), tracker, zones, fights, since)
 +    tracker.maybe_timeout()
 +    if since is not None:
 +        fights = [f for f in fights if f["start_wall"] > since]
@@ -259,8 +358,9 @@ index 0000000..c381eaa
 +            "log": os.path.abspath(log_path), "fights": fights}
 +
 +
-+def run(log_path, out=None, since=None, indent=None, verbose=True):
-+    result = collect(log_path, since)
++def run(log_path, out=None, since=None, indent=None, verbose=True,
++        state=None):
++    result = collect(log_path, since, state)
 +    text = json.dumps(result, indent=indent, default=str)
 +    if not out:
 +        print(text)
@@ -282,6 +382,7 @@ index 0000000..c381eaa
 +    log_path = ""
 +    out = None
 +    since = None
++    state = None
 +    indent = None
 +    verbose = True
 +    i = 0
@@ -293,6 +394,9 @@ index 0000000..c381eaa
 +        elif a == "--since":
 +            i += 1
 +            since = float(argv[i])
++        elif a == "--state":
++            i += 1
++            state = argv[i]
 +        elif a == "--indent":
 +            i += 1
 +            indent = int(argv[i])
@@ -304,8 +408,9 @@ index 0000000..c381eaa
 +    if not log_path or not os.path.isfile(log_path):
 +        raise SystemExit(
 +            "usage: python eql_fights_cli.py <eqlog file> [--out PATH] "
-+            "[--since UNIX] [--indent N] [--quiet]")
-+    run(log_path, out=out, since=since, indent=indent, verbose=verbose)
++            "[--since UNIX] [--state PATH] [--indent N] [--quiet]")
++    run(log_path, out=out, since=since, indent=indent, verbose=verbose,
++        state=state)
 +
 +
 +if __name__ == "__main__":
@@ -724,6 +829,364 @@ index 4419f5c..c81b352 100644
      "eql_spell_db.py", "eql_verified_spells.py", "eql_update_check.py",
      "eql_atlas_baseline.json.gz", "eql_quest_db.json.gz",
      "icon.png", "LICENSE", "README.md", "RELEASE_NOTES.md",
+diff --git a/test_eql_atlas_channel.py b/test_eql_atlas_channel.py
+new file mode 100644
+index 0000000..9c29be2
+--- /dev/null
++++ b/test_eql_atlas_channel.py
+@@ -0,0 +1,117 @@
++"""python -m unittest test_eql_atlas_channel"""
++
++import os
++import random
++import tempfile
++import unittest
++
++import eql_atlas
++
++SETUP = "[Wed Aug 05 20:00:00 2026] Set channels to be joined at login: {}:1\n"
++NOISE = "[Wed Aug 05 20:00:01 2026] You slash a goblin for 12 points of damage.\n"
++
++
++class DB:
++    def __init__(self):
++        self.data = {}
++        self.dirty = False
++
++
++class Tracker:
++    def __init__(self, db):
++        self.db = db
++        self.cmd_channel = ""
++
++    def _learn_channel(self, name):
++        self.cmd_channel = name.lower()
++
++
++def full_scan(path):
++    tracker = Tracker(DB())
++    eql_atlas.learn_channel_from_log(path, tracker)
++    return tracker.cmd_channel
++
++
++class ChannelScan(unittest.TestCase):
++    def setUp(self):
++        self.dir = tempfile.TemporaryDirectory()
++        self.addCleanup(self.dir.cleanup)
++        self.log = os.path.join(self.dir.name, "eqlog_Dorsk_erudin.txt")
++        self.db = DB()
++
++    def write(self, data, mode="wb"):
++        with open(self.log, mode) as fh:
++            fh.write(data)
++
++    def scan(self):
++        tracker = Tracker(self.db)
++        eql_atlas.learn_channel_from_log(self.log, tracker)
++        return tracker.cmd_channel
++
++    def test_only_the_new_bytes_are_scanned(self):
++        self.write((NOISE * 50_000).encode())
++        self.scan()
++        size = os.path.getsize(self.log)
++        self.write(NOISE.encode() * 10, "ab")
++        reads = []
++        real = eql_atlas._RE_CH_ANY
++
++        class Counting:
++            def finditer(self, text):
++                reads.append(len(text))
++                return real.finditer(text)
++
++        eql_atlas._RE_CH_ANY = Counting()
++        try:
++            self.scan()
++        finally:
++            eql_atlas._RE_CH_ANY = real
++        self.assertLess(sum(reads), 4096 + 10 * len(NOISE) + 1)
++        self.assertGreater(os.path.getsize(self.log), size)
++
++    def test_an_idle_log_leaves_the_db_clean(self):
++        self.write((NOISE * 1000).encode())
++        self.scan()
++        self.assertTrue(self.db.dirty)
++        self.db.dirty = False
++        self.scan()
++        self.assertFalse(self.db.dirty)
++
++    def test_a_setup_line_after_the_last_scan_is_found(self):
++        self.write((NOISE * 1000).encode())
++        self.scan()
++        self.write((NOISE * 3 + SETUP.format("Raidcall")).encode(), "ab")
++        self.assertEqual(self.scan(), "raidcall")
++
++    def test_a_setup_line_half_written_at_the_last_scan_is_found(self):
++        line = SETUP.format("Halfway").encode()
++        self.write((NOISE * 1000).encode() + line[:30])
++        self.assertEqual(self.scan(), "")
++        self.write(line[30:], "ab")
++        self.assertEqual(self.scan(), "halfway")
++
++    def test_a_shorter_log_is_scanned_from_the_start(self):
++        self.write((NOISE * 5000).encode())
++        self.scan()
++        self.write((SETUP.format("Rotated") + NOISE * 10).encode())
++        self.assertEqual(self.scan(), "rotated")
++
++    def test_the_same_channel_as_a_full_scan_at_every_cut(self):
++        rng = random.Random(7)
++        lines = [NOISE] * 40_000
++        for n in range(6):
++            lines.insert(rng.randrange(len(lines)), SETUP.format(f"Chan{n}"))
++        data = "".join(lines).encode()
++        for trial in range(20):
++            self.db = DB()
++            cuts = sorted(rng.randrange(len(data)) for _ in range(rng.randrange(1, 6)))
++            for cut in cuts + [len(data)]:
++                self.write(data[:cut])
++                learned = self.scan()
++                self.assertEqual(learned, full_scan(self.log), f"trial {trial} cut {cut}")
++                if learned:
++                    break
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test_eql_fights_cli.py b/test_eql_fights_cli.py
+new file mode 100644
+index 0000000..d939de2
+--- /dev/null
++++ b/test_eql_fights_cli.py
+@@ -0,0 +1,229 @@
++"""python -m unittest test_eql_fights_cli
++
++EQL_FIGHTS_SAMPLE=<eqlog_Name_server.txt> also replays a real log, cut at
++EQL_FIGHTS_CUTS points (default 7).
++"""
++
++import json
++import os
++import subprocess
++import sys
++import tempfile
++import unittest
++from datetime import datetime, timedelta
++from unittest import mock
++
++import eql_combat_tracker
++import eql_fights_cli as cli
++
++START = datetime(2026, 8, 5, 20, 0, 0)
++
++
++def stamp(at):
++    return at.strftime("[%a %b %d %H:%M:%S %Y] ")
++
++
++def fight_lines(at, mob, pet="Gobaner"):
++    lines = []
++    for n in range(6):
++        t = at + timedelta(seconds=n * 2)
++        lines.append(stamp(t) + f"You slash {mob} for {20 + n} points of damage.")
++        lines.append(stamp(t) + f"{pet} bites {mob} for {5 + n} points of damage.")
++        lines.append(stamp(t) + f"{mob.capitalize()} hits YOU for {3 + n} points of damage.")
++    lines.append(stamp(at + timedelta(seconds=13)) + f"You have slain {mob}!")
++    return lines
++
++
++def synthetic_log():
++    at = START
++    lines = [stamp(at) + "Welcome to EverQuest Legends!",
++             stamp(at) + "You have entered Clan Crushbone.",
++             stamp(at) + "Gobaner says 'Following you, Master.'"]
++    for n in range(12):
++        at += timedelta(minutes=2)
++        if n == 6:
++            lines.append(stamp(at) + "You have entered Butcherblock Mountains.")
++        if n == 9:
++            lines.append(stamp(at) + "Welcome to EverQuest Legends!")
++        lines.extend(fight_lines(at, f"an orc pawn {n}" if n % 2 else "a goblin"))
++    return ("\n".join(lines) + "\n").encode("cp1252")
++
++
++class LiveClock:
++    """Real time just past the log's last line, as when tailing a live log."""
++
++    def __init__(self, log):
++        self.log = log
++        self.seen = None
++
++    def time(self):
++        st = os.stat(self.log)
++        if self.seen != (st.st_size, st.st_mtime_ns):
++            self.seen, self.now = (st.st_size, st.st_mtime_ns), self.last()
++        return self.now
++
++    def last(self):
++        with open(self.log, "rb") as fh:
++            fh.seek(max(0, os.fstat(fh.fileno()).st_size - 65536))
++            lines = fh.read().splitlines()
++        for line in reversed(lines):
++            at = cli._stamp(line.decode("cp1252", "replace"))
++            if at is not None:
++                return at + 1
++        return 0.0
++
++
++class Incremental(unittest.TestCase):
++    def setUp(self):
++        self.dir = tempfile.TemporaryDirectory()
++        self.log = os.path.join(self.dir.name, "eqlog_Dorsk_erudin.txt")
++        self.state = os.path.join(self.dir.name, "fights.state")
++        clock = mock.patch.object(eql_combat_tracker, "time", LiveClock(self.log))
++        clock.start()
++        self.addCleanup(clock.stop)
++
++    def tearDown(self):
++        self.dir.cleanup()
++
++    def write(self, data, mode="wb"):
++        with open(self.log, mode) as fh:
++            fh.write(data)
++
++    def full(self, since=None):
++        return cli.collect(self.log, since)["fights"]
++
++    def resumed(self, since=None):
++        return cli.collect(self.log, since, state=self.state)["fights"]
++
++    def cuts(self, data, count):
++        step = max(1, len(data) // count)
++        return [min(len(data), step * n) for n in range(1, count)] + [len(data)]
++
++    def replay_in_pieces(self, data, count, ack=False):
++        self.write(b"")
++        shipped, since = [], None
++        for cut in self.cuts(data, count):
++            self.write(data[:cut])
++            got = self.resumed(since)
++            self.assertEqual(got, self.full(since), f"cut at {cut} of {len(data)}")
++            if ack and got:
++                shipped.extend(got)
++                since = max(f["start_wall"] for f in got)
++        return shipped
++
++    def test_a_resumed_parse_matches_a_full_parse_at_every_cut(self):
++        data = synthetic_log()
++        self.replay_in_pieces(data, 17)
++        self.assertEqual(len(self.full()), 10)
++
++    def test_acknowledged_fights_are_not_sent_again_and_none_is_lost(self):
++        data = synthetic_log()
++        shipped = self.replay_in_pieces(data, 9, ack=True)
++        self.assertEqual(shipped, self.full())
++
++    def test_a_fight_cut_in_the_middle_comes_out_once_and_whole(self):
++        data = synthetic_log()
++        middle = data.index(b"an orc pawn 3 for 22")
++        self.write(data[:middle])
++        before = self.resumed()
++        self.write(data)
++        after = self.resumed(max(f["start_wall"] for f in before))
++        whole = [f for f in self.full() if f["enemies"] == ["an orc pawn 3"]]
++        self.assertEqual([f for f in after if f["enemies"] == ["an orc pawn 3"]], whole)
++        self.assertNotIn("an orc pawn 3", [e for f in before for e in f["enemies"]])
++
++    def test_a_half_written_last_line_is_read_once_it_is_finished(self):
++        data = synthetic_log()
++        line = data.index(b"You have slain an orc pawn 5!")
++        self.write(data[:line + 12])
++        self.resumed()
++        self.write(data)
++        self.assertEqual(self.resumed(), self.full())
++
++    def test_a_truncated_or_rotated_log_is_read_again_from_the_start(self):
++        data = synthetic_log()
++        self.write(data)
++        self.resumed()
++        shorter = data[:len(data) // 3]
++        self.write(shorter)
++        self.assertEqual(self.resumed(), self.full())
++
++        rotated = data.replace(b"20:", b"22:")
++        self.write(rotated)
++        self.assertEqual(self.resumed(), self.full())
++        self.write(rotated + data)
++        self.assertEqual(self.resumed(), self.full())
++
++    def test_a_watermark_older_than_the_checkpoint_reads_the_whole_log(self):
++        data = synthetic_log()
++        self.write(data)
++        got = self.resumed()
++        self.resumed(got[5]["start_wall"])
++        self.assertEqual(self.resumed(), self.full())
++        self.assertEqual(self.resumed(got[2]["start_wall"]),
++                         self.full(got[2]["start_wall"]))
++
++    def test_an_unreadable_checkpoint_is_a_full_parse(self):
++        data = synthetic_log()
++        self.write(data[:len(data) // 2])
++        self.resumed()
++        with open(self.state, "wb") as fh:
++            fh.write(b"not a checkpoint")
++        self.write(data)
++        self.assertEqual(self.resumed(), self.full())
++
++    def test_the_checkpoint_skips_what_it_has_read(self):
++        data = synthetic_log()
++        self.write(data)
++        self.resumed()
++        more = fight_lines(START + timedelta(hours=1), "a gnoll")
++        self.write(("\n".join(more) + "\n").encode("cp1252"), "ab")
++        seen = []
++        real = cli.CombatTracker.handle_line
++
++        def counted(tracker, line):
++            seen.append(line)
++            return real(tracker, line)
++
++        cli.CombatTracker.handle_line = counted
++        try:
++            got = self.resumed()
++        finally:
++            cli.CombatTracker.handle_line = real
++        self.assertEqual(len(seen), len(more))
++        self.assertEqual(got, self.full())
++
++    def test_a_restarted_process_resumes_from_the_checkpoint(self):
++        data = synthetic_log()
++        half = len(data) // 2
++        self.write(data[:half])
++        out = os.path.join(self.dir.name, "out.json")
++        here = os.path.dirname(os.path.abspath(cli.__file__))
++        cmd = [sys.executable, os.path.join(here, "eql_fights_cli.py"),
++               self.log, "--out", out, "--state", self.state, "--quiet"]
++        subprocess.run(cmd, check=True)
++        self.assertTrue(os.path.isfile(self.state))
++        self.write(data)
++        subprocess.run(cmd, check=True)
++        with open(out, encoding="utf-8") as fh:
++            resumed = json.load(fh)["fights"]
++        subprocess.run(cmd[:5] + ["--quiet"], check=True)
++        with open(out, encoding="utf-8") as fh:
++            self.assertEqual(resumed, json.load(fh)["fights"])
++
++    @unittest.skipUnless(os.environ.get("EQL_FIGHTS_SAMPLE"), "no real log")
++    def test_a_real_log_cut_at_several_points(self):
++        with open(os.environ["EQL_FIGHTS_SAMPLE"], "rb") as fh:
++            data = fh.read()
++        self.log = os.path.join(self.dir.name,
++                                os.path.basename(os.environ["EQL_FIGHTS_SAMPLE"]))
++        clock = mock.patch.object(eql_combat_tracker, "time", LiveClock(self.log))
++        clock.start()
++        self.addCleanup(clock.stop)
++        count = int(os.environ.get("EQL_FIGHTS_CUTS", "7"))
++        self.assertEqual(self.replay_in_pieces(data, count, ack=True), self.full())
++        self.assertTrue(self.full())
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/tools/compare_headless_gui.sh b/tools/compare_headless_gui.sh
 new file mode 100755
 index 0000000..c86a442

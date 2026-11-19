@@ -590,6 +590,7 @@ impl Daemon {
                 &tool,
                 path,
                 &out,
+                &fights::state_path(&dir, &character, &server),
                 since.as_deref(),
                 self.config.tools.log_reader.replay_timeout(),
             )
