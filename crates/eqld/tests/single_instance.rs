@@ -125,6 +125,40 @@ fn a_lock_left_behind_by_a_killed_daemon_does_not_block_the_next_start() {
 }
 
 #[test]
+fn a_lock_naming_a_live_eqld_that_does_not_hold_it_is_stale() {
+    let other = tempfile::tempdir().unwrap();
+    let other_config = harness(other.path());
+    let mut live = daemon(&other_config, &[]);
+    wait_for(&other.path().join(eqld::lock::FILE_NAME), true);
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = harness(dir.path());
+    let lock = dir.path().join(eqld::lock::FILE_NAME);
+    std::fs::copy(other.path().join(eqld::lock::FILE_NAME), &lock).unwrap();
+
+    let mut next = daemon(&config, &[]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let holder: Option<eqld::lock::Holder> = std::fs::read(&lock)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if holder.is_some_and(|holder| holder.pid == next.id()) {
+            break;
+        }
+        assert!(
+            next.try_wait().unwrap().is_none(),
+            "a pid that holds no lock blocked the start"
+        );
+        assert!(Instant::now() < deadline, "the stale lock was never taken");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for child in [&mut next, &mut live] {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+}
+
+#[test]
 fn force_starts_anyway_and_the_loser_leaves_the_lock_alone() {
     let dir = tempfile::tempdir().unwrap();
     let config = harness(dir.path());
