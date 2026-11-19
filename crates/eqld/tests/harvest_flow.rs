@@ -306,6 +306,39 @@ async fn a_changed_doc_ships_exactly_once_more() {
     assert_eq!(recorder.count(), 4);
 }
 
+/// Every `--replay` run that sees the log grow rewrites the atlas DB with a new
+/// `updated` stamp and `log_pos`, even when nothing in it changed.
+#[tokio::test]
+async fn an_atlas_rewrite_that_only_moves_its_stamp_and_log_position_is_not_reshipped() {
+    let recorder = Recorder::new(201);
+    let addr = spawn_server(recorder.clone()).await;
+    let game = tempfile::tempdir().unwrap();
+    let harvest = tempfile::tempdir().unwrap();
+    plant_all(&harvest);
+    let mut daemon = harness(&game, Some(&harvest), addr);
+    assert_eq!(daemon.tick().await.harvested, 3);
+
+    let path = harvest.path().join(ATLAS);
+    let restamp = |at: i64| {
+        let mut doc: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["updated"] = Value::from(at);
+        doc["log_pos"]["c:/eq/logs/eqlog_dorsk_erudin.txt"] = Value::from(at * 10);
+        std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    };
+
+    restamp(1_754_400_000);
+    let report = daemon.tick().await;
+    assert_eq!(report.harvested, 0);
+    assert_eq!(report.harvest_skipped, 3);
+
+    restamp(1_754_400_120);
+    drop(daemon);
+    let mut restarted = harness(&game, Some(&harvest), addr);
+    assert_eq!(restarted.tick().await.harvested, 0, "nor after a restart");
+    assert_eq!(recorder.count(), 3);
+}
+
 #[tokio::test]
 async fn harvest_stays_off_unless_it_is_enabled() {
     let recorder = Recorder::new(201);

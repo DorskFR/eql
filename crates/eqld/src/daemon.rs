@@ -195,6 +195,9 @@ pub struct Daemon {
     inventory_notes: Notices,
     log_notes: Notices,
     harvest_notes: Notices,
+    /// Per harvest key, the raw content hash last read and its stable hash,
+    /// so an untouched file is not parsed again every tick.
+    harvest_hashes: HashMap<String, (String, String)>,
     install_note: Notice,
     install_backoff: Backoff,
     next_install: Option<std::time::Instant>,
@@ -299,6 +302,7 @@ impl Daemon {
             inventory_notes: Notices::new(),
             log_notes: Notices::new(),
             harvest_notes: Notices::new(),
+            harvest_hashes: HashMap::new(),
             install_note: Notice::new(),
             install_backoff: Backoff::with_max(INSTALL_RETRY, INSTALL_RETRY_MAX),
             next_install: None,
@@ -1465,6 +1469,7 @@ impl Daemon {
         let groups = harvest::group(paths);
         let keys: Vec<String> = groups.iter().map(|group| group.key.clone()).collect();
         self.harvest_notes.retain(&keys);
+        self.harvest_hashes.retain(|key, _| keys.contains(key));
         let mut dirty = false;
         for group in groups {
             match self.harvest_group(&group, report).await {
@@ -1512,7 +1517,21 @@ impl Daemon {
             }
             return Ok(false);
         }
-        let hash = content_hash(&contents.concat());
+        let raw = content_hash(&contents.concat());
+        let mut parsed = None;
+        let hash = match self.harvest_hashes.get(&file_name) {
+            Some((seen, stable)) if *seen == raw => stable.clone(),
+            _ => {
+                let Some(docs) = self.parse_harvest(&file_name, &contents, report) else {
+                    return Ok(false);
+                };
+                let stable = bytes_hash(&harvest::stable_bytes(&group.kind, &docs));
+                self.harvest_hashes
+                    .insert(file_name.clone(), (raw, stable.clone()));
+                parsed = Some(docs);
+                stable
+            }
+        };
         match decide(self.state.harvest.get(&file_name), &hash) {
             Decision::SkipAlreadyUploaded => {
                 report.harvest_skipped += 1;
@@ -1533,25 +1552,13 @@ impl Daemon {
             Decision::Upload => {}
         }
 
-        let mut docs = Vec::with_capacity(contents.len());
-        for text in &contents {
-            match serde_json::from_str(text) {
-                Ok(doc) => docs.push(doc),
-                Err(err) => {
-                    report.parse_failures += 1;
-                    if self
-                        .harvest_notes
-                        .report(&file_name, format!("not json: {err}"))
-                    {
-                        tracing::warn!(file = %file_name, %err, "harvest file is not json yet, retrying quietly each tick");
-                    }
-                    return Ok(false);
-                }
-            }
-        }
-        if self.harvest_notes.clear(&file_name) {
-            tracing::info!(file = %file_name, "harvest file is readable again");
-        }
+        let docs = match parsed {
+            Some(docs) => docs,
+            None => match self.parse_harvest(&file_name, &contents, report) {
+                Some(docs) => docs,
+                None => return Ok(false),
+            },
+        };
 
         let upload = HarvestDoc {
             character: group.character.clone(),
@@ -1628,6 +1635,34 @@ impl Daemon {
             },
         );
         Ok(true)
+    }
+
+    fn parse_harvest(
+        &mut self,
+        file_name: &str,
+        contents: &[String],
+        report: &mut TickReport,
+    ) -> Option<Vec<serde_json::Value>> {
+        let mut docs = Vec::with_capacity(contents.len());
+        for text in contents {
+            match serde_json::from_str(text) {
+                Ok(doc) => docs.push(doc),
+                Err(err) => {
+                    report.parse_failures += 1;
+                    if self
+                        .harvest_notes
+                        .report(file_name, format!("not json: {err}"))
+                    {
+                        tracing::warn!(file = %file_name, %err, "harvest file is not json yet, retrying quietly each tick");
+                    }
+                    return None;
+                }
+            }
+        }
+        if self.harvest_notes.clear(file_name) {
+            tracing::info!(file = %file_name, "harvest file is readable again");
+        }
+        Some(docs)
     }
 
     async fn send<T: Serialize>(
