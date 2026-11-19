@@ -34,6 +34,10 @@ jobs:
       - name: Apply the vendored patch to a fresh upstream checkout
         run: vendor/eql-log-reader/apply.sh "$RUNNER_TEMP/eql-log-reader"
 
+      - name: Resumed reads match full ones
+        working-directory: ${{ runner.temp }}/eql-log-reader
+        run: python3 -m unittest -v test_eql_fights_cli test_eql_atlas_channel
+
   web:
     runs-on: ubuntu-latest
     defaults:

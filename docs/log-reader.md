@@ -78,6 +78,14 @@ replays exactly the same batch and a tick with nothing new posts nothing at all.
 The dumps are staged beside the state file, never in the log reader's own
 directory — that one is uploaded wholesale as harvest documents.
 
+The tool reads the whole log once. Beside the dump it keeps a checkpoint
+(`eql_fights_<character>_<server>.state`): the tracker as it stood after the
+last complete line, plus the fights not yet accepted, so later ticks parse only
+what the log gained. A log that shrank or no longer starts or ends where the
+checkpoint left it (rotated, rewritten), a reader of another version, a
+watermark older than the checkpoint's, or an unreadable checkpoint all mean a
+full read again; deleting the file forces one.
+
 A fight still running when the log ends is not shipped until it closes: the same
 fight would otherwise arrive twice under one `start_wall`, and the first,
 half-finished version would be the one that stuck.
@@ -89,7 +97,9 @@ the `atlas` overlay: the overlay autosaves its database and the two would fight.
 With the patched reader this mode **does** keep quest progress — the replay
 credits looted items against the tracked quests and records hand-in dialogue,
 resuming from the same persisted byte offset the overlay uses, so nothing is
-credited twice.
+credited twice. While it knows no chat channel, the replay looks for the latest
+channel setup line; the end of that search is kept in the Atlas DB
+(`channel_scan`), so a log without one is searched once and then only past it.
 
 What no amount of patching gets you is *which* quests you are doing: the log
 records that you looted two Crushbone Belts, never that you mean to hand them

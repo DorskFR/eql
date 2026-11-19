@@ -35,6 +35,10 @@ pub fn out_path(dir: &Path, character: &str, server: &str) -> PathBuf {
     dir.join(format!("eql_fights_{character}_{server}.json"))
 }
 
+pub fn state_path(dir: &Path, character: &str, server: &str) -> PathBuf {
+    dir.join(format!("eql_fights_{character}_{server}.state"))
+}
+
 pub fn parse(text: &str) -> Result<Vec<Value>, serde_json::Error> {
     serde_json::from_str::<Emitted>(text).map(Emitted::fights)
 }
@@ -109,6 +113,10 @@ mod tests {
         assert_eq!(
             out_path(Path::new("/var/eqld/fights"), "Dorsk", "erudin"),
             PathBuf::from("/var/eqld/fights/eql_fights_Dorsk_erudin.json")
+        );
+        assert_eq!(
+            state_path(Path::new("/var/eqld/fights"), "Dorsk", "erudin"),
+            PathBuf::from("/var/eqld/fights/eql_fights_Dorsk_erudin.state")
         );
     }
 

@@ -80,7 +80,7 @@ fn the_patched_spec_builds_the_headless_tools_as_console_binaries() {
 fn the_fights_tool_listens_for_fights_instead_of_reading_the_history() {
     let patch = read("headless.patch");
     assert!(patch.contains("+from eql_combat_tracker import CombatTracker"));
-    assert!(patch.contains("+    tracker.fight_listeners.append("));
+    assert!(patch.contains("+        tracker.fight_listeners.append("));
     assert!(
         !patch.contains("tracker.history"),
         "the fights tool must never read the capped, session-reset history"
@@ -88,6 +88,33 @@ fn the_fights_tool_listens_for_fights_instead_of_reading_the_history() {
     assert!(
         patch.contains(r#"+ZONE_RE = re.compile(TS_RE + r"You have entered (?P<zone>.+)\.\s*$")"#),
         "a fight carries the zone it happened in"
+    );
+}
+
+/// Re-reading a 500 MB log on every tick costs minutes of a core; the tool
+/// resumes from its checkpoint and still answers as a full read would.
+#[test]
+fn the_fights_tool_resumes_from_a_checkpoint() {
+    let patch = read("headless.patch");
+    assert!(patch.contains("+        elif a == \"--state\":"));
+    assert!(patch.contains("+        fh.seek(offset)"));
+    assert!(
+        patch.contains("+        if _fingerprint(fh, offset) != ckpt[\"fingerprint\"]:"),
+        "a rotated or rewritten log is read from the start"
+    );
+    let saved = patch
+        .find("+            _save(state, fh,")
+        .expect("no checkpoint save");
+    let timed_out = patch
+        .find("+    tracker.maybe_timeout()")
+        .expect("no timeout");
+    assert!(
+        saved < timed_out,
+        "the checkpoint is the tracker before the wall-clock timeout touches it"
+    );
+    assert!(
+        patch.contains("+++ b/test_eql_fights_cli.py"),
+        "the equivalence tests travel with the patch"
     );
 }
 
@@ -99,6 +126,11 @@ fn the_channel_scan_reads_the_log_a_chunk_at_a_time() {
     assert!(patch.contains("-            data = f.read().decode(\"cp1252\", \"replace\")"));
     assert!(patch.contains("+                chunk = f.read(1 << 20)"));
     assert!(patch.contains("+                tail = window[-4096:]"));
+    assert!(
+        patch.contains("+            f.seek(max(0, start - 4096))"),
+        "a log with no setup line is scanned once, then only what it gains"
+    );
+    assert!(patch.contains("+++ b/test_eql_atlas_channel.py"));
 }
 
 /// The replay credits quests through `QuestDB`/`QuestState`, which need no
