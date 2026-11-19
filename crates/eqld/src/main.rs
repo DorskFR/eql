@@ -141,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     daemon.shutdown().await;
-    guard.release();
+    drop(guard);
     Ok(())
 }
 

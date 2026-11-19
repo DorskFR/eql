@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions, TryLockError},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
 pub const FILE_NAME: &str = "eqld.lock";
 
@@ -17,32 +21,12 @@ pub struct Holder {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    Held,
-    Stale,
-}
-
-pub fn process_name(pid: u32) -> Option<String> {
+fn process_name(pid: u32) -> Option<String> {
     let pid = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     let process = system.process(pid)?;
     Some(process.name().to_string_lossy().into_owned())
-}
-
-fn stem(name: &str) -> String {
-    name.trim()
-        .trim_end_matches(".exe")
-        .trim_end_matches(".EXE")
-        .to_ascii_lowercase()
-}
-
-pub fn judge(holder: &Holder, running: Option<&str>) -> Verdict {
-    match running {
-        Some(found) if stem(found) == stem(&holder.name) => Verdict::Held,
-        _ => Verdict::Stale,
-    }
 }
 
 fn me() -> Holder {
@@ -53,16 +37,21 @@ fn me() -> Holder {
     }
 }
 
+/// An advisory lock held on the file for the process lifetime: the kernel
+/// drops it when the process dies, whatever its PID namespace. The holder
+/// written into the file is only there to name it in a refusal.
 #[derive(Debug)]
 pub struct Lock {
     path: PathBuf,
     holder: Holder,
+    file: File,
 }
 
 impl Lock {
-    /// `force` takes the lock even from a live holder, for recovering a rig
-    /// where the pid was reused by another eqld that is not ours to stop.
+    /// `force` takes the path from a live holder by replacing the file, for a
+    /// rig whose holder is not ours to stop.
     pub fn acquire(path: &Path, force: bool) -> Result<Self, LockError> {
+        let io = |source| LockError::Io(path.to_path_buf(), source);
         let holder = me();
         let body = serde_json::to_vec(&holder).map_err(LockError::Encode)?;
         if let Some(parent) = path
@@ -74,57 +63,57 @@ impl Lock {
         }
 
         for _ in 0..3 {
-            match std::fs::OpenOptions::new()
+            let file = OpenOptions::new()
+                .read(true)
                 .write(true)
-                .create_new(true)
+                .create(true)
+                .truncate(false)
                 .open(path)
-            {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    file.write_all(&body)
-                        .map_err(|source| LockError::Io(path.to_path_buf(), source))?;
+                .map_err(io)?;
+            match file.try_lock() {
+                Ok(()) => {
+                    if !is_at(path, &file) {
+                        continue;
+                    }
+                    if let Some(previous) = read_holder(&file) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            pid = previous.pid,
+                            "the lock is stale, taking it over"
+                        );
+                    }
+                    write_holder(&file, &body).map_err(io)?;
                     return Ok(Self {
                         path: path.to_path_buf(),
                         holder,
+                        file,
                     });
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(err) => return Err(LockError::Io(path.to_path_buf(), err)),
-            }
-
-            let existing = std::fs::read(path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Holder>(&bytes).ok());
-            match &existing {
-                Some(existing) if !force => {
-                    let running = process_name(existing.pid);
-                    if judge(existing, running.as_deref()) == Verdict::Held {
+                Err(TryLockError::WouldBlock) => {
+                    if !is_at(path, &file) {
+                        continue;
+                    }
+                    let existing = std::fs::File::open(path)
+                        .ok()
+                        .and_then(|file| read_holder(&file));
+                    if !force {
                         return Err(LockError::Held {
                             path: path.to_path_buf(),
-                            pid: existing.pid,
-                            name: existing.name.clone(),
+                            holder: existing,
                         });
                     }
                     tracing::warn!(
                         path = %path.display(),
-                        pid = existing.pid,
-                        "the lock is stale, taking it over"
+                        pid = ?existing.map(|holder| holder.pid),
+                        "--force: taking the lock from its holder"
                     );
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(err) => return Err(io(err)),
+                    }
                 }
-                Some(existing) => tracing::warn!(
-                    path = %path.display(),
-                    pid = existing.pid,
-                    "--force: taking the lock from its holder"
-                ),
-                None => tracing::warn!(
-                    path = %path.display(),
-                    "the lock file is unreadable, taking it over"
-                ),
-            }
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(LockError::Io(path.to_path_buf(), err)),
+                Err(TryLockError::Error(err)) => return Err(io(err)),
             }
         }
         Err(LockError::Contended(path.to_path_buf()))
@@ -137,41 +126,72 @@ impl Lock {
     pub fn holder(&self) -> &Holder {
         &self.holder
     }
+}
 
-    /// Only removes the file while it still names us, so a lock already taken
-    /// over by another instance survives this one's exit.
-    pub fn release(&self) {
-        let ours = std::fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Holder>(&bytes).ok())
-            .is_some_and(|found| found.pid == self.holder.pid);
-        if !ours {
-            return;
-        }
-        if let Err(err) = std::fs::remove_file(&self.path) {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(path = %self.path.display(), %err, "cannot release the lock");
+impl Drop for Lock {
+    /// Removes the file only while the path is still ours, so a lock taken
+    /// over with `--force` survives this one's exit. Windows keeps the file:
+    /// the lock, not the file, is what counts.
+    fn drop(&mut self) {
+        if cfg!(unix) && is_at(&self.path, &self.file) {
+            if let Err(err) = std::fs::remove_file(&self.path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(path = %self.path.display(), %err, "cannot release the lock");
+                }
             }
         }
     }
 }
 
-impl Drop for Lock {
-    fn drop(&mut self) {
-        self.release();
+fn read_holder(file: &File) -> Option<Holder> {
+    let mut bytes = Vec::new();
+    let mut reader = file;
+    reader.seek(SeekFrom::Start(0)).ok()?;
+    reader.read_to_end(&mut bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_holder(file: &File, body: &[u8]) -> std::io::Result<()> {
+    file.set_len(0)?;
+    let mut writer = file;
+    writer.seek(SeekFrom::Start(0))?;
+    writer.write_all(body)?;
+    writer.flush()
+}
+
+/// Whether `path` still names the file we opened, rather than one that
+/// replaced it after a `--force` or a release.
+#[cfg(unix)]
+fn is_at(path: &Path, file: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(path), file.metadata()) {
+        (Ok(at_path), Ok(ours)) => at_path.dev() == ours.dev() && at_path.ino() == ours.ino(),
+        _ => false,
     }
+}
+
+#[cfg(not(unix))]
+fn is_at(path: &Path, _file: &File) -> bool {
+    path.exists()
+}
+
+fn describe(holder: &Option<Holder>) -> String {
+    holder
+        .as_ref()
+        .map(|holder| format!(" as pid {} ({})", holder.pid, holder.name))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
     #[error(
-        "another eqld is already running as pid {pid} ({name}); \
-         stop it, or start with --force to take {path} from it"
+        "another eqld is already running{}; \
+         stop it, or start with --force to take {path} from it",
+        describe(.holder)
     )]
     Held {
         path: PathBuf,
-        pid: u32,
-        name: String,
+        holder: Option<Holder>,
     },
     #[error("{0} keeps being retaken by another instance; nothing was started")]
     Contended(PathBuf),
@@ -211,26 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn a_holder_is_only_believed_while_its_pid_is_still_that_program() {
-        let holder = Holder {
-            pid: 42,
-            name: "eqld.exe".into(),
-        };
-        assert_eq!(judge(&holder, Some("eqld.exe")), Verdict::Held);
-        assert_eq!(
-            judge(&holder, Some("eqld")),
-            Verdict::Held,
-            "the same daemon built for another platform still holds it"
-        );
-        assert_eq!(
-            judge(&holder, Some("eqgame.exe")),
-            Verdict::Stale,
-            "the pid was reused by something else"
-        );
-        assert_eq!(judge(&holder, None), Verdict::Stale, "the pid is gone");
-    }
-
-    #[test]
     fn a_second_instance_is_refused_and_told_which_pid_holds_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
@@ -240,7 +240,10 @@ mod tests {
 
         let refused = Lock::acquire(&path, false).unwrap_err();
         match &refused {
-            LockError::Held { pid, .. } => assert_eq!(*pid, std::process::id()),
+            LockError::Held {
+                holder: Some(holder),
+                ..
+            } => assert_eq!(holder.pid, std::process::id()),
             other => panic!("{other}"),
         }
         assert!(
@@ -283,6 +286,15 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_naming_our_own_pid_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, serde_json::to_vec(&me()).unwrap()).unwrap();
+        let taken = Lock::acquire(&path, false).unwrap();
+        assert_eq!(taken.holder().pid, std::process::id());
+    }
+
+    #[test]
     fn a_truncated_lock_file_is_taken_over() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
@@ -306,7 +318,9 @@ mod tests {
             let _held = Lock::acquire(&path, false).unwrap();
             assert!(path.exists());
         }
-        assert!(!path.exists(), "a normal exit releases it");
+        if cfg!(unix) {
+            assert!(!path.exists(), "a normal exit removes it");
+        }
         assert!(
             Lock::acquire(&path, false).is_ok(),
             "and the next start is not refused"
@@ -318,17 +332,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         let lost = Lock::acquire(&path, false).unwrap();
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&Holder {
-                pid: lost.holder().pid + 1,
-                name: "eqld".into(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
+        let winner = Lock::acquire(&path, true).unwrap();
         drop(lost);
         assert!(path.exists());
+        assert!(
+            matches!(Lock::acquire(&path, false), Err(LockError::Held { .. })),
+            "the winner still holds it"
+        );
+        drop(winner);
+        assert!(Lock::acquire(&path, false).is_ok());
+    }
+
+    #[test]
+    fn a_lock_whose_holder_died_without_cleaning_up_does_not_block_a_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        {
+            let crashed = File::create(&path).unwrap();
+            crashed.try_lock().unwrap();
+            write_holder(&crashed, &serde_json::to_vec(&me()).unwrap()).unwrap();
+        }
+        assert!(path.exists(), "nothing cleaned the file up");
+        assert!(Lock::acquire(&path, false).is_ok());
     }
 
     #[test]
