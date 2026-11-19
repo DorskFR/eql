@@ -100,6 +100,40 @@ impl Group {
     }
 }
 
+/// Top-level fields the log reader rewrites on every save, whether or not
+/// anything else in the document changed.
+fn volatile_keys(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "atlas" => &["updated", "log_pos"],
+        _ => &[],
+    }
+}
+
+/// The documents as they count for change detection: without their volatile
+/// fields, so a rewrite that only moves those is not a change.
+pub fn stable_bytes(kind: &str, docs: &[serde_json::Value]) -> Vec<u8> {
+    let skip = volatile_keys(kind);
+    let kept: Vec<std::collections::BTreeMap<&str, &serde_json::Value>> = docs
+        .iter()
+        .map(|doc| {
+            doc.as_object()
+                .map(|object| {
+                    object
+                        .iter()
+                        .filter(|(key, _)| !skip.contains(&key.as_str()))
+                        .map(|(key, value)| (key.as_str(), value))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    let mut bytes = serde_json::to_vec(&kept).unwrap_or_default();
+    for doc in docs.iter().filter(|doc| !doc.is_object()) {
+        bytes.extend(serde_json::to_vec(doc).unwrap_or_default());
+    }
+    bytes
+}
+
 pub fn group(paths: Vec<PathBuf>) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
     for path in paths {
@@ -157,6 +191,30 @@ mod tests {
     fn identity(file_name: &str) -> (String, String, String, Option<String>) {
         let parsed = parse_filename(file_name).expect("parsable");
         (parsed.kind, parsed.character, parsed.server, parsed.build)
+    }
+
+    #[test]
+    fn only_the_atlas_stamp_and_log_position_are_ignored_for_change_detection() {
+        let atlas = |updated: i64, pos: i64, kills: i64| {
+            vec![serde_json::json!({
+                "updated": updated,
+                "log_pos": { "eqlog.txt": pos },
+                "totals": { "kills": kills },
+            })]
+        };
+        assert_eq!(
+            stable_bytes("atlas", &atlas(1, 10, 5)),
+            stable_bytes("atlas", &atlas(2, 20, 5))
+        );
+        assert_ne!(
+            stable_bytes("atlas", &atlas(1, 10, 5)),
+            stable_bytes("atlas", &atlas(1, 10, 6))
+        );
+        assert_ne!(
+            stable_bytes("quest", &atlas(1, 10, 5)),
+            stable_bytes("quest", &atlas(2, 10, 5)),
+            "other kinds keep every field"
+        );
     }
 
     #[test]
