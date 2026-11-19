@@ -23,6 +23,7 @@ struct Captured {
 struct Recorder {
     requests: Arc<Mutex<Vec<Captured>>>,
     status: Arc<AtomicU16>,
+    fail_request: Arc<Mutex<Option<usize>>>,
 }
 
 impl Recorder {
@@ -30,6 +31,7 @@ impl Recorder {
         Self {
             requests: Arc::default(),
             status: Arc::new(AtomicU16::new(200)),
+            fail_request: Arc::default(),
         }
     }
 
@@ -40,6 +42,10 @@ impl Recorder {
     fn answer(&self, status: u16) {
         self.status.store(status, Ordering::SeqCst);
     }
+
+    fn fail_request(&self, index: usize) {
+        *self.fail_request.lock().unwrap() = Some(index);
+    }
 }
 
 async fn ingest(
@@ -48,14 +54,20 @@ async fn ingest(
     Json(body): Json<Value>,
 ) -> (axum::http::StatusCode, Json<Value>) {
     let received = body["fights"].as_array().map(Vec::len).unwrap_or_default();
-    recorder.requests.lock().unwrap().push(Captured {
+    let mut requests = recorder.requests.lock().unwrap();
+    let failed = *recorder.fail_request.lock().unwrap() == Some(requests.len());
+    requests.push(Captured {
         authorization: headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .map(String::from),
         body,
     });
-    let status = axum::http::StatusCode::from_u16(recorder.status.load(Ordering::SeqCst)).unwrap();
+    drop(requests);
+    let status = match failed {
+        true => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        false => axum::http::StatusCode::from_u16(recorder.status.load(Ordering::SeqCst)).unwrap(),
+    };
     (
         status,
         Json(json!({ "received": received, "stored": received })),
@@ -292,6 +304,66 @@ async fn a_rejected_batch_is_replayed_on_the_next_tick() {
         state.fights["eqlog_Dorsk_erudin.txt"].last_start_wall_ms,
         1_785_931_338_000
     );
+}
+
+fn starts(request: &Captured) -> Vec<f64> {
+    request.body["fights"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fight| fight["start_wall"].as_f64().unwrap())
+        .collect()
+}
+
+/// A long log's first dump is megabytes; eqls reads at most 2 MB a request.
+#[tokio::test]
+async fn a_large_history_goes_up_in_batches_and_resumes_after_a_failed_one() {
+    let recorder = Recorder::new();
+    recorder.fail_request(1);
+    let addr = spawn_server(recorder.clone()).await;
+    let root = TempDir::new().unwrap();
+    let tools = TempDir::new().unwrap();
+    let history: Vec<Value> = (0..8000)
+        .map(|n| fight(1785931338.0 + f64::from(n) * 60.0, "Najena"))
+        .collect();
+    let dump = json!({ "character": "Dorsk", "server": "erudin", "fights": history });
+    assert!(dump.to_string().len() > 2 * 1024 * 1024);
+    install_fights_tool(&tools, &dump, &dump);
+    let config = harness(&root, &tools, addr);
+
+    let (report, state) = tick(&config).await;
+    let sent = recorder.requests();
+    assert_eq!(sent.len(), 2, "stops at the batch that failed");
+    assert!(
+        serde_json::to_vec(&sent[0].body).unwrap().len() <= eqld::fights::MAX_BATCH_BYTES + 100
+    );
+    let first = starts(&sent[0]);
+    assert_eq!(first[0], 1785931338.0, "oldest first");
+    assert_eq!(report.fights, first.len());
+    assert_eq!(report.retryable_failures, 1);
+    let mark = state.fights["eqlog_Dorsk_erudin.txt"].last_start_wall_ms;
+    assert_eq!(
+        mark,
+        (first.last().unwrap() * 1000.0) as i64,
+        "the accepted batch moved the watermark"
+    );
+
+    let (report, state) = tick(&config).await;
+    let sent = recorder.requests();
+    let resent: Vec<f64> = sent[2..].iter().flat_map(starts).collect();
+    assert_eq!(
+        resent[0],
+        starts(&sent[1])[0],
+        "picks up at the failed batch"
+    );
+    assert_eq!(
+        first.len() + resent.len(),
+        8000,
+        "every fight once, none twice"
+    );
+    assert_eq!(report.fights, resent.len());
+    assert!(sent.len() > 3, "the rest is still batched");
+    assert_eq!(state.fights["eqlog_Dorsk_erudin.txt"].uploaded, 8000);
 }
 
 #[tokio::test]

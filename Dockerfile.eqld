@@ -4,11 +4,22 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --release -p eqld
 
+FROM debian:trixie-slim AS log-reader
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+COPY vendor/eql-log-reader /vendor/eql-log-reader
+RUN /vendor/eql-log-reader/apply.sh /src \
+    && mkdir /out \
+    && cp /src/eql_*.py /src/eql_*.json.gz /src/LICENSE /out/ \
+    && rm /out/eql_*_build.py
+
 FROM debian:trixie-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 1000 --user-group eqld
 COPY --from=builder /build/target/release/eqld /usr/local/bin/eqld
+COPY --from=log-reader /out /opt/eql-log-reader
 USER 1000:1000
 ENTRYPOINT ["/usr/local/bin/eqld"]

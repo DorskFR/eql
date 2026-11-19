@@ -1,8 +1,37 @@
 diff --git a/eql_atlas.py b/eql_atlas.py
-index aaae642..266f1d4 100644
+index aaae642..208d0d0 100644
 --- a/eql_atlas.py
 +++ b/eql_atlas.py
-@@ -1590,6 +1590,32 @@ def learn_channel_from_log(log_path, tracker):
+@@ -1575,21 +1575,54 @@ _RE_CH_ANY = re.compile(
+ def learn_channel_from_log(log_path, tracker):
+     """Fallback channel discovery: the setup lines ('Set channels to be
+     joined at login: ...') may sit in log territory that's already been
+-    ingested and will never be re-read. Scans the WHOLE log (one regex
+-    pass, well under a second) for the most recent one -- and only ever
+-    runs while no channel is known, i.e. at most once per character."""
++    ingested and will never be re-read. Scans the WHOLE log for the most
++    recent one, whenever no channel is known -- every replay, for a log
++    that has none -- so it reads a chunk at a time, overlapping each by more
++    than a setup line so none is split."""
++    last = None
+     try:
+         with open(log_path, "rb") as f:
+-            data = f.read().decode("cp1252", "replace")
++            tail = b""
++            while True:
++                chunk = f.read(1 << 20)
++                if not chunk:
++                    break
++                window = tail + chunk
++                for m in _RE_CH_ANY.finditer(window.decode("cp1252", "replace")):
++                    last = m.group(1)
++                tail = window[-4096:]
+     except OSError:
+         return
+-    last = None
+-    for m in _RE_CH_ANY.finditer(data):
+-        last = m.group(1)
+     if last:
          tracker._learn_channel(last)
  
  
@@ -35,7 +64,7 @@ index aaae642..266f1d4 100644
  def replay(log_path):
      char, server = char_server_from(log_path)
      baseline = Baseline()
-@@ -1605,6 +1631,7 @@ def replay(log_path):
+@@ -1605,6 +1638,7 @@ def replay(log_path):
          pass
      tracker = AtlasTracker(db, baseline, session_from=float("inf"),
                             command_channel=db.data.get("command_channel", ""))
@@ -43,7 +72,7 @@ index aaae642..266f1d4 100644
      t0 = time.time()
      start = db.log_pos(log_path) or 0
      end = ingest(log_path, tracker, start)
-@@ -1612,6 +1639,15 @@ def replay(log_path):
+@@ -1612,6 +1646,15 @@ def replay(log_path):
      if not tracker.cmd_channel:
          learn_channel_from_log(log_path, tracker)
      db.save()
@@ -59,7 +88,7 @@ index aaae642..266f1d4 100644
  
      tot = db.data["totals"]
      print(f"replayed {end - start:,} bytes in {time.time() - t0:.1f}s "
-@@ -2871,6 +2907,15 @@ def main():
+@@ -2871,6 +2914,15 @@ def main():
              raise SystemExit("usage: python eql_atlas.py --replay <eqlog file>")
          replay(args[1])
          return
@@ -468,6 +497,24 @@ index 0000000..8176e0f
 +
 +if __name__ == "__main__":
 +    main(sys.argv[1:])
+diff --git a/eql_quest.py b/eql_quest.py
+index e615997..2b89c81 100644
+--- a/eql_quest.py
++++ b/eql_quest.py
+@@ -69,8 +69,11 @@ import os
+ import re
+ import sys
+ import time
+-import tkinter as tk
+-from tkinter import font as tkfont
++try:
++    import tkinter as tk
++    from tkinter import font as tkfont
++except ImportError:
++    tk = tkfont = None
+ 
+ from eql_overlay_common import text_scale, scaled
+ 
 diff --git a/eql_quest_cli.py b/eql_quest_cli.py
 new file mode 100644
 index 0000000..54568c1
