@@ -27,7 +27,7 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
-    "@dorsk/hmm": "^0.5.2",
+    "@dorsk/hmm": "^0.7.0",
     "@dorsk/tsumikit": "^0.85.1",
     "@tanstack/svelte-query": "^6.1.38"
   }
