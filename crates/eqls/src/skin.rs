@@ -186,8 +186,8 @@ pub fn generate_bundle(
 
 pub fn zip_bundle(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, SkinError> {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options: zip::write::FileOptions<'_, ()> =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     for (path, contents) in files {
         writer.start_file(path, options)?;
         writer
@@ -914,7 +914,10 @@ mod tests {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         assert_eq!(archive.len(), XML_FILES.len() + 1);
 
-        let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+        let names: Vec<String> = archive
+            .file_names()
+            .map(|name| name.unwrap().into_owned())
+            .collect();
         assert!(names.contains(&INI_NAME.to_string()));
         assert!(names.contains(&"uifiles/dorskui/EQUI_PlayerWindow.xml".to_string()));
 

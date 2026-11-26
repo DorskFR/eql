@@ -33,7 +33,7 @@ impl Server {
 
 fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+    let options = zip::write::SimpleFileOptions::default();
     for (name, body) in files {
         writer.start_file(*name, options).unwrap();
         writer.write_all(body.as_bytes()).unwrap();

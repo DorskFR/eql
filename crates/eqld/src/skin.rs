@@ -154,7 +154,7 @@ pub fn install_parts(root: &Path, bundle: &[u8], write_ini: bool) -> Result<Stri
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name()?.into_owned();
         if !is_safe_entry(&name) {
             return Err(InstallError::UnsafePath(name));
         }
@@ -251,7 +251,7 @@ mod tests {
 
     fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         for (name, body) in files {
             writer.start_file(*name, options).unwrap();
             writer.write_all(body.as_bytes()).unwrap();
@@ -426,6 +426,38 @@ mod tests {
             install(root.path(), &skinless),
             Err(InstallError::NoSkinDir)
         ));
+    }
+
+    #[test]
+    fn an_escaping_entry_anywhere_in_the_bundle_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        for evil in [
+            "../UI_Dorsk_erudin_LO1.ini",
+            "uifiles/dorskui/../../../escape.xml",
+            "/etc/passwd",
+            "uifiles\\dorskui\\..\\..\\escape.xml",
+            "uifiles//dorskui/EQUI_ChatWindow.xml",
+        ] {
+            let mut files = BUNDLE.to_vec();
+            files.push((evil, "nope"));
+            let error = install(root.path(), &zip_of(&files)).unwrap_err();
+            assert!(
+                matches!(&error, InstallError::UnsafePath(name) if name == evil),
+                "{evil}: {error}"
+            );
+            assert_eq!(
+                std::fs::read_dir(root.path()).unwrap().count(),
+                0,
+                "{evil}: a refused bundle must not land any file"
+            );
+        }
+
+        assert_eq!(install(root.path(), &zip_of(BUNDLE)).unwrap(), "dorskui");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("uifiles/dorskui/EQUI_ChatWindow.xml"))
+                .unwrap(),
+            "chat"
+        );
     }
 
     #[tokio::test]

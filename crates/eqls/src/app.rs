@@ -988,9 +988,9 @@ async fn items_by_name(
         return Ok(HashMap::new());
     }
     let folded: Vec<String> = names.iter().map(|name| fold_name(name)).collect();
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "select id, game_id, name, stats, scraped_at from items where {SQL_FOLD} = any($1)"
-    ))
+    )))
     .bind(&folded)
     .fetch_all(pool)
     .await?;
@@ -1022,9 +1022,9 @@ async fn items_by_variant(
         .iter()
         .map(|name| format!("{} (%", like_escape(&fold_name(name))))
         .collect();
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "select id, game_id, name, stats, scraped_at from items where {SQL_FOLD} like any($1)"
-    ))
+    )))
     .bind(&patterns)
     .fetch_all(pool)
     .await?;
@@ -1381,10 +1381,10 @@ async fn get_item(
         return Ok(Json(item_from_row(&row)?));
     }
     for (candidate, tier) in name_candidates(&key) {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
             "select id, game_id, name, stats, scraped_at from items \
              where {SQL_FOLD} = $1 limit 1"
-        ))
+        )))
         .bind(fold_name(&candidate))
         .fetch_optional(&state.pool)
         .await?;
@@ -2206,7 +2206,7 @@ mod tests {
             let mut admin = PgConnection::connect_with(&server)
                 .await
                 .expect("EQLS_TEST_DATABASE_URL is set but unreachable");
-            sqlx::query(&format!(r#"create database "{name}""#))
+            sqlx::query(sqlx::AssertSqlSafe(format!(r#"create database "{name}""#)))
                 .execute(&mut admin)
                 .await
                 .unwrap();
@@ -2231,9 +2231,11 @@ mod tests {
                     .unwrap()
                     .block_on(async {
                         if let Ok(mut admin) = PgConnection::connect_with(&server).await {
-                            let _ = sqlx::query(&format!(r#"drop database "{name}" with (force)"#))
-                                .execute(&mut admin)
-                                .await;
+                            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                                r#"drop database "{name}" with (force)"#
+                            )))
+                            .execute(&mut admin)
+                            .await;
                         }
                     })
             })
@@ -3141,9 +3143,14 @@ mod tests {
         );
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
-        let names: Vec<&str> = archive.file_names().collect();
-        assert!(names.contains(&"uifiles/my_skin/EQUI_PlayerWindow.xml"));
-        assert!(names.contains(&skin::INI_NAME));
+        let names: Vec<String> = archive
+            .file_names()
+            .map(|name| name.unwrap().into_owned())
+            .collect();
+        assert!(names
+            .iter()
+            .any(|name| name == "uifiles/my_skin/EQUI_PlayerWindow.xml"));
+        assert!(names.iter().any(|name| name == skin::INI_NAME));
 
         let (status, light) = json_of(
             &app,
