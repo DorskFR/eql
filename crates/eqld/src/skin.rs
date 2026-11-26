@@ -212,11 +212,18 @@ fn skin_of(entry: &str) -> Option<&str> {
         .filter(|skin| !skin.is_empty())
 }
 
+/// Checked as text rather than with `Path`, so a drive prefix (`C:`), a UNC or
+/// verbatim path, or an NTFS stream name is refused on every host OS, not only
+/// on the Windows one where joining it would replace the game root.
 fn is_safe_entry(name: &str) -> bool {
     !name.is_empty()
-        && !name.starts_with('/')
-        && !name.contains('\\')
-        && !name.split('/').any(|part| part == ".." || part.is_empty())
+        && !name.contains(['\\', ':', '\0'])
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && Path::new(name)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 fn unix_stamp() -> String {
@@ -437,6 +444,14 @@ mod tests {
             "/etc/passwd",
             "uifiles\\dorskui\\..\\..\\escape.xml",
             "uifiles//dorskui/EQUI_ChatWindow.xml",
+            "C:/Users/x/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/a.bat",
+            "C:x.bat",
+            "uifiles/dorskui/a:b",
+            "UI_Dorsk_erudin_LO1.ini:stream",
+            "//server/share/x",
+            "\\\\?\\C:\\x",
+            "\\\\server\\share\\x",
+            "uifiles/dorskui/./EQUI_ChatWindow.xml",
         ] {
             let mut files = BUNDLE.to_vec();
             files.push((evil, "nope"));
