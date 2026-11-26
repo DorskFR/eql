@@ -43,10 +43,10 @@ pub fn pick<'a>(names: &'a [String], channel: &str, screen: (i32, i32)) -> Optio
         .map(|(name, _)| name.as_str())
 }
 
-pub async fn list(config: &Config) -> Result<Vec<String>, ExportError> {
+pub async fn list(client: &reqwest::Client, config: &Config) -> Result<Vec<String>, ExportError> {
     let base = config.api.url.trim_end_matches('/');
     let url = format!("{base}/api/v1/layouts");
-    let response = reqwest::Client::new()
+    let response = client
         .get(&url)
         .bearer_auth(&config.api.token)
         .send()

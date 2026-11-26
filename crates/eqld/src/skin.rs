@@ -21,6 +21,8 @@ pub enum InstallError {
         status: reqwest::StatusCode,
         body: String,
     },
+    #[error("building http client: {0}")]
+    Client(#[source] reqwest::Error),
     #[error("the bundle is not a readable zip: {0}")]
     Zip(#[from] zip::result::ZipError),
     #[error("bundle entry {0:?} escapes the game root")]
@@ -89,9 +91,13 @@ pub fn changed(previous: Option<&crate::state::SkinState>, args: &Args, digest: 
     }
 }
 
-pub async fn fetch(config: &Config, args: &Args) -> Result<Vec<u8>, InstallError> {
+pub async fn fetch(
+    client: &reqwest::Client,
+    config: &Config,
+    args: &Args,
+) -> Result<Vec<u8>, InstallError> {
     let url = bundle_url(config, args);
-    let response = reqwest::Client::new()
+    let response = client
         .get(&url)
         .bearer_auth(&config.api.token)
         .send()
@@ -120,7 +126,8 @@ pub async fn fetch(config: &Config, args: &Args) -> Result<Vec<u8>, InstallError
 
 pub async fn run(config: &Config, args: &[String]) -> Result<(), InstallError> {
     let args = parse_args(args)?;
-    let bytes = fetch(config, &args).await?;
+    let client = crate::http::client(crate::http::REQUEST_TIMEOUT).map_err(InstallError::Client)?;
+    let bytes = fetch(&client, config, &args).await?;
 
     let skin = install(&config.game.root, &bytes)?;
     tracing::info!(

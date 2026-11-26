@@ -216,10 +216,14 @@ pub struct Diag {
 
 impl Daemon {
     pub fn new(config: Config) -> Result<Self, DaemonError> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(DaemonError::Client)?;
+        Self::with_request_timeout(config, crate::http::REQUEST_TIMEOUT)
+    }
+
+    pub fn with_request_timeout(
+        config: Config,
+        request_timeout: Duration,
+    ) -> Result<Self, DaemonError> {
+        let client = crate::http::client(request_timeout).map_err(DaemonError::Client)?;
         let state_path = config.state_path();
         let state = State::load(&state_path).map_err(DaemonError::State)?;
         let backoff = Backoff::new(config.poll_interval());
@@ -779,7 +783,7 @@ impl Daemon {
         };
         let (source, target) = match settings.channel() {
             Some(channel) => {
-                let names = match crate::channel::list(&self.config).await {
+                let names = match crate::channel::list(&self.client, &self.config).await {
                     Ok(names) => names,
                     Err(err) => {
                         self.note_export(&format!("cannot list layouts for {channel}: {err}"));
@@ -801,7 +805,7 @@ impl Daemon {
             None => (direct.unwrap_or_default().to_string(), None),
         };
         if !matches!(&self.export_sizes, Some((named, _)) if *named == source) {
-            match crate::export::sizes_for(&self.config, &source).await {
+            match crate::export::sizes_for(&self.client, &self.config, &source).await {
                 Ok(sizes) => self.export_sizes = Some((source.clone(), sizes)),
                 Err(err) => {
                     self.note_export(&format!("cannot read the {source} layout: {err}"));
@@ -839,7 +843,7 @@ impl Daemon {
             {
                 continue;
             }
-            match crate::export::upload(&self.config, &export).await {
+            match crate::export::upload(&self.client, &self.config, &export).await {
                 Ok(problems) => {
                     report.exports += 1;
                     dirty = true;
@@ -882,7 +886,7 @@ impl Daemon {
             .skin
             .screen
             .or_else(|| crate::export::resolution(root))?;
-        let names = match crate::channel::list(&self.config).await {
+        let names = match crate::channel::list(&self.client, &self.config).await {
             Ok(names) => names,
             Err(err) => {
                 self.note_skin(&format!("cannot list layouts for {channel}: {err}"));
@@ -987,7 +991,7 @@ impl Daemon {
                 skin: settings.name.clone(),
             },
         };
-        let bytes = match skin::fetch(&self.config, &args).await {
+        let bytes = match skin::fetch(&self.client, &self.config, &args).await {
             Ok(bytes) => bytes,
             Err(err) => {
                 self.note_skin(&format!("cannot fetch the skin bundle: {err}"));
