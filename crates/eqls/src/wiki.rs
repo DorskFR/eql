@@ -405,8 +405,12 @@ fn effect_label(line: &str) -> Option<(&'static str, &str)> {
         ("worn effect:", "worn"),
         ("focus effect:", "focus"),
     ] {
-        if line.len() >= prefix.len() && line[..prefix.len()].eq_ignore_ascii_case(prefix) {
-            return Some((kind, line[prefix.len()..].trim()));
+        if let Some(rest) = line
+            .get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .and_then(|_| line.get(prefix.len()..))
+        {
+            return Some((kind, rest.trim()));
         }
     }
     None
@@ -594,6 +598,30 @@ mod tests {
             "{{Itempage|itemname=Test – Item|statsblock=WT: 0.5 – Size: SMALL|notes=café ×2}}";
         let params = template_params(text, "Itempage").expect("params");
         assert_eq!(params[0].1, "Test – Item");
+    }
+
+    #[test]
+    fn a_multibyte_char_across_an_effect_prefix_does_not_panic() {
+        for line in [
+            "Worn — Haste",
+            "Effect—x",
+            "Click effe—ct: x",
+            "Clicky effec—t: x",
+            "Combat effec—t: x",
+            "Focus effe—ct: x",
+        ] {
+            assert_eq!(effect_label(line), None, "{line}");
+        }
+        assert_eq!(effect_label("WORN EFFECT: Haste"), Some(("worn", "Haste")));
+        assert_eq!(effect_label("Combat effect:é"), Some(("proc", "é")));
+
+        let item = parse_item(
+            "Test Item",
+            "{{Itempage|itemname=Test Item|statsblock=Worn — Haste<br>Focus Effect: Burning Affliction}}",
+        )
+        .expect("Itempage template");
+        assert_eq!(item.effects.len(), 1, "{:?}", item.effects);
+        assert_eq!(item.effects[0].kind, "focus");
     }
 
     #[test]
