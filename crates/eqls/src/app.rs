@@ -36,7 +36,38 @@ const SHEET_LIMIT: usize = 1024 * 1024;
 pub struct AppState {
     pub pool: PgPool,
     pub machine_token: Arc<str>,
-    icons: Arc<RwLock<HashMap<i32, Bytes>>>,
+    icons: Arc<RwLock<IconCache>>,
+}
+
+/// A read that started before an upload must not put back what the upload
+/// replaced, so loads are tagged with the generation they began under.
+#[derive(Default)]
+struct IconCache {
+    pngs: HashMap<i32, Bytes>,
+    generation: u64,
+}
+
+impl IconCache {
+    fn get(&self, icon: i32) -> Option<Bytes> {
+        self.pngs.get(&icon).cloned()
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn insert_loaded(&mut self, icon: i32, png: Bytes, loaded_under: u64) {
+        if loaded_under == self.generation {
+            self.pngs.insert(icon, png);
+        }
+    }
+
+    fn invalidate(&mut self, icons: &[i32]) {
+        self.generation += 1;
+        for icon in icons {
+            self.pngs.remove(icon);
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1893,11 +1924,11 @@ async fn put_icon_sheet(
     .execute(&state.pool)
     .await?;
 
-    let mut cache = state.icons.write().expect("icon cache is not poisoned");
-    for icon in &ids {
-        cache.remove(icon);
-    }
-    drop(cache);
+    state
+        .icons
+        .write()
+        .expect("icon cache is not poisoned")
+        .invalidate(&ids);
 
     tracing::info!(sheet, icons = ids.len(), "stored icon sheet");
     Ok(Json(SheetAccepted {
@@ -1919,12 +1950,10 @@ async fn get_icon(
     if icons::locate(icon).is_none() {
         return Err(AppError::NotFound);
     }
-    let cached = state
-        .icons
-        .read()
-        .expect("icon cache is not poisoned")
-        .get(&icon)
-        .cloned();
+    let (cached, generation) = {
+        let cache = state.icons.read().expect("icon cache is not poisoned");
+        (cache.get(icon), cache.generation())
+    };
     let png = match cached {
         Some(png) => png,
         None => {
@@ -1938,7 +1967,7 @@ async fn get_icon(
                 .icons
                 .write()
                 .expect("icon cache is not poisoned")
-                .insert(icon, png.clone());
+                .insert_loaded(icon, png.clone(), generation);
             png
         }
     };
@@ -3784,6 +3813,19 @@ mod tests {
             request = request.header("authorization", format!("Bearer {token}"));
         }
         request.body(Body::from(dds)).unwrap()
+    }
+
+    #[test]
+    fn an_icon_read_from_before_an_upload_is_not_cached_after_it() {
+        let mut cache = IconCache::default();
+        let before_upload = cache.generation();
+        cache.invalidate(&[624]);
+        cache.insert_loaded(624, Bytes::from_static(b"old"), before_upload);
+        assert_eq!(cache.get(624), None, "the replaced png must not come back");
+
+        let after_upload = cache.generation();
+        cache.insert_loaded(624, Bytes::from_static(b"new"), after_upload);
+        assert_eq!(cache.get(624), Some(Bytes::from_static(b"new")));
     }
 
     #[tokio::test]
