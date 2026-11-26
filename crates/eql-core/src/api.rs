@@ -28,6 +28,13 @@ pub struct HarvestDoc {
 
 pub const HARVEST_KINDS: [&str; 3] = ["atlas", "quest", "alltime"];
 
+/// The largest harvest file (or group of files) eqld ships.
+pub const HARVEST_MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+
+/// What eqls accepts on /api/v1/harvest: twice the file cap, so re-encoding
+/// and the envelope never push a shippable file over it.
+pub const HARVEST_BODY_LIMIT: usize = 2 * HARVEST_MAX_FILE_BYTES;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogBatch {
     pub character: String,

@@ -16,7 +16,7 @@ use axum::{
     Json, Router,
 };
 use eql_core::{
-    api::{HarvestDoc, InventoryUpload, LogBatch, LogEventKind, HARVEST_KINDS},
+    api::{HarvestDoc, InventoryUpload, LogBatch, LogEventKind, HARVEST_BODY_LIMIT, HARVEST_KINDS},
     inventory::InventoryEntry,
     layout::{Layout, Style},
 };
@@ -65,7 +65,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     let ingest = Router::new()
         .route("/api/v1/inventory", post(ingest))
         .route("/api/v1/events", post(ingest_events))
-        .route("/api/v1/harvest", post(ingest_harvest))
+        .route(
+            "/api/v1/harvest",
+            post(ingest_harvest).layer(DefaultBodyLimit::max(HARVEST_BODY_LIMIT)),
+        )
         .route("/api/v1/fights", post(ingest_fights))
         .route(
             "/api/v1/icons/sheets/{sheet}",
@@ -2735,6 +2738,24 @@ mod tests {
         assert_eq!(
             status_of(post_harvest(Some("wrong"), &body)).await,
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_harvest_doc_as_large_as_eqld_ships_is_read_whole() {
+        let blob = "a".repeat(eql_core::api::HARVEST_MAX_FILE_BYTES);
+        let body = harvest_body("spellbook", &format!(r#"{{"blob":"{blob}"}}"#));
+        assert_eq!(
+            status_of(post_harvest(Some("s3cret"), &body)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the body reaches validation instead of the default 2 MiB limit"
+        );
+
+        let blob = "a".repeat(HARVEST_BODY_LIMIT);
+        let body = harvest_body("atlas", &format!(r#"{{"blob":"{blob}"}}"#));
+        assert_eq!(
+            status_of(post_harvest(Some("s3cret"), &body)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
         );
     }
 

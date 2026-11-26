@@ -1,7 +1,7 @@
-use eql_core::api::HARVEST_KINDS;
+use eql_core::api::{HARVEST_KINDS, HARVEST_MAX_FILE_BYTES};
 use std::path::{Path, PathBuf};
 
-pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_BYTES: u64 = HARVEST_MAX_FILE_BYTES as u64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
