@@ -10,6 +10,7 @@ pub mod fights;
 pub mod harvest;
 #[cfg(windows)]
 pub mod hidden;
+pub mod http;
 pub mod icons;
 pub mod install;
 pub mod lock;

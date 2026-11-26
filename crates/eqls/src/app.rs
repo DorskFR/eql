@@ -16,7 +16,7 @@ use axum::{
     Json, Router,
 };
 use eql_core::{
-    api::{HarvestDoc, InventoryUpload, LogBatch, LogEventKind, HARVEST_KINDS},
+    api::{HarvestDoc, InventoryUpload, LogBatch, LogEventKind, HARVEST_BODY_LIMIT, HARVEST_KINDS},
     inventory::InventoryEntry,
     layout::{Layout, Style},
 };
@@ -36,7 +36,50 @@ const SHEET_LIMIT: usize = 1024 * 1024;
 pub struct AppState {
     pub pool: PgPool,
     pub machine_token: Arc<str>,
-    icons: Arc<RwLock<HashMap<i32, Bytes>>>,
+    icons: Arc<RwLock<IconCache>>,
+}
+
+/// A read that started before an upload must not put back what the upload
+/// replaced, so loads are tagged with the generation they began under.
+#[derive(Default)]
+struct IconCache {
+    pngs: HashMap<i32, Bytes>,
+    generation: u64,
+}
+
+impl IconCache {
+    fn get(&self, icon: i32) -> Option<Bytes> {
+        self.pngs.get(&icon).cloned()
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn insert_loaded(&mut self, icon: i32, png: Bytes, loaded_under: u64) {
+        if loaded_under == self.generation {
+            self.pngs.insert(icon, png);
+        }
+    }
+
+    fn invalidate(&mut self, icons: &[i32]) {
+        self.generation += 1;
+        for icon in icons {
+            self.pngs.remove(icon);
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("EQLS_MACHINE_TOKEN is blank; refusing to serve machine endpoints without a token")]
+pub struct BlankMachineToken;
+
+/// A blank token would match a request that sends no Authorization header.
+pub fn machine_token(raw: &str) -> Result<Arc<str>, BlankMachineToken> {
+    if raw.trim().is_empty() {
+        return Err(BlankMachineToken);
+    }
+    Ok(Arc::from(raw))
 }
 
 impl AppState {
@@ -53,7 +96,10 @@ pub fn router(state: AppState, web_dist: PathBuf) -> Router {
     let ingest = Router::new()
         .route("/api/v1/inventory", post(ingest))
         .route("/api/v1/events", post(ingest_events))
-        .route("/api/v1/harvest", post(ingest_harvest))
+        .route(
+            "/api/v1/harvest",
+            post(ingest_harvest).layer(DefaultBodyLimit::max(HARVEST_BODY_LIMIT)),
+        )
         .route("/api/v1/fights", post(ingest_fights))
         .route(
             "/api/v1/icons/sheets/{sheet}",
@@ -152,7 +198,10 @@ async fn require_machine_token(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or_default();
-    if !constant_time_eq(presented.as_bytes(), state.machine_token.as_bytes()) {
+    if presented.is_empty()
+        || state.machine_token.trim().is_empty()
+        || !constant_time_eq(presented.as_bytes(), state.machine_token.as_bytes())
+    {
         return Err(AppError::Unauthorized);
     }
     Ok(next.run(request).await)
@@ -1875,11 +1924,11 @@ async fn put_icon_sheet(
     .execute(&state.pool)
     .await?;
 
-    let mut cache = state.icons.write().expect("icon cache is not poisoned");
-    for icon in &ids {
-        cache.remove(icon);
-    }
-    drop(cache);
+    state
+        .icons
+        .write()
+        .expect("icon cache is not poisoned")
+        .invalidate(&ids);
 
     tracing::info!(sheet, icons = ids.len(), "stored icon sheet");
     Ok(Json(SheetAccepted {
@@ -1901,12 +1950,10 @@ async fn get_icon(
     if icons::locate(icon).is_none() {
         return Err(AppError::NotFound);
     }
-    let cached = state
-        .icons
-        .read()
-        .expect("icon cache is not poisoned")
-        .get(&icon)
-        .cloned();
+    let (cached, generation) = {
+        let cache = state.icons.read().expect("icon cache is not poisoned");
+        (cache.get(icon), cache.generation())
+    };
     let png = match cached {
         Some(png) => png,
         None => {
@@ -1920,7 +1967,7 @@ async fn get_icon(
                 .icons
                 .write()
                 .expect("icon cache is not poisoned")
-                .insert(icon, png.clone());
+                .insert_loaded(icon, png.clone(), generation);
             png
         }
     };
@@ -2064,6 +2111,47 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(status_of(request).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn a_blank_machine_token_is_refused_at_startup() {
+        for blank in ["", " ", "\t\n"] {
+            assert!(machine_token(blank).is_err(), "{blank:?}");
+        }
+        assert_eq!(&*machine_token("s3cret").unwrap(), "s3cret");
+    }
+
+    #[tokio::test]
+    async fn a_blank_machine_token_lets_no_request_through() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://nobody:nobody@127.0.0.1:1/nothing")
+            .unwrap();
+        for blank in ["", " "] {
+            let app = router(
+                AppState::new(pool.clone(), Arc::from(blank)),
+                PathBuf::from("web/build"),
+            );
+            for authorization in [None, Some("Bearer "), Some("Bearer  ")] {
+                let mut request = Request::builder()
+                    .uri("/api/v1/devices")
+                    .header("content-type", "application/json");
+                if let Some(value) = authorization {
+                    request = request.header("authorization", value);
+                }
+                let status = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status();
+                assert_eq!(
+                    status,
+                    StatusCode::UNAUTHORIZED,
+                    "token {blank:?}, header {authorization:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -2679,6 +2767,24 @@ mod tests {
         assert_eq!(
             status_of(post_harvest(Some("wrong"), &body)).await,
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_harvest_doc_as_large_as_eqld_ships_is_read_whole() {
+        let blob = "a".repeat(eql_core::api::HARVEST_MAX_FILE_BYTES);
+        let body = harvest_body("spellbook", &format!(r#"{{"blob":"{blob}"}}"#));
+        assert_eq!(
+            status_of(post_harvest(Some("s3cret"), &body)).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the body reaches validation instead of the default 2 MiB limit"
+        );
+
+        let blob = "a".repeat(HARVEST_BODY_LIMIT);
+        let body = harvest_body("atlas", &format!(r#"{{"blob":"{blob}"}}"#));
+        assert_eq!(
+            status_of(post_harvest(Some("s3cret"), &body)).await,
+            StatusCode::PAYLOAD_TOO_LARGE
         );
     }
 
@@ -3707,6 +3813,19 @@ mod tests {
             request = request.header("authorization", format!("Bearer {token}"));
         }
         request.body(Body::from(dds)).unwrap()
+    }
+
+    #[test]
+    fn an_icon_read_from_before_an_upload_is_not_cached_after_it() {
+        let mut cache = IconCache::default();
+        let before_upload = cache.generation();
+        cache.invalidate(&[624]);
+        cache.insert_loaded(624, Bytes::from_static(b"old"), before_upload);
+        assert_eq!(cache.get(624), None, "the replaced png must not come back");
+
+        let after_upload = cache.generation();
+        cache.insert_loaded(624, Bytes::from_static(b"new"), after_upload);
+        assert_eq!(cache.get(624), Some(Bytes::from_static(b"new")));
     }
 
     #[tokio::test]

@@ -145,7 +145,11 @@ pub fn read(
     }))
 }
 
-pub async fn upload(config: &Config, export: &Export) -> Result<Vec<String>, ExportError> {
+pub async fn upload(
+    client: &reqwest::Client,
+    config: &Config,
+    export: &Export,
+) -> Result<Vec<String>, ExportError> {
     let base = config.api.url.trim_end_matches('/');
     let url = format!("{base}/api/v1/layouts/{}", urlencode(&export.name));
     let body = serde_json::json!({
@@ -153,7 +157,7 @@ pub async fn upload(config: &Config, export: &Export) -> Result<Vec<String>, Exp
         "screen_h": export.screen_h,
         "layout": export.layout,
     });
-    let response = reqwest::Client::new()
+    let response = client
         .put(&url)
         .bearer_auth(&config.api.token)
         .json(&body)
@@ -185,10 +189,14 @@ pub async fn upload(config: &Config, export: &Export) -> Result<Vec<String>, Exp
         .unwrap_or_default())
 }
 
-pub async fn sizes_for(config: &Config, layout: &str) -> Result<WindowSizes, ExportError> {
+pub async fn sizes_for(
+    client: &reqwest::Client,
+    config: &Config,
+    layout: &str,
+) -> Result<WindowSizes, ExportError> {
     let base = config.api.url.trim_end_matches('/');
     let url = format!("{base}/api/v1/layouts/{}", urlencode(layout));
-    let response = reqwest::Client::new()
+    let response = client
         .get(&url)
         .bearer_auth(&config.api.token)
         .send()
