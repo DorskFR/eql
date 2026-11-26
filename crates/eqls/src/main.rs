@@ -10,7 +10,7 @@ mod wiki;
 
 use app::AppState;
 use sqlx::postgres::PgPoolOptions;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -56,7 +56,7 @@ async fn item_dump_command(args: &[String]) -> Result<(), Box<dyn std::error::Er
 }
 
 async fn serve() -> Result<(), Box<dyn std::error::Error>> {
-    let machine_token: Arc<str> = Arc::from(std::env::var("EQLS_MACHINE_TOKEN")?);
+    let machine_token = app::machine_token(&std::env::var("EQLS_MACHINE_TOKEN")?)?;
     let listen_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let web_dist = PathBuf::from(std::env::var("WEB_DIST").unwrap_or_else(|_| "web/build".into()));
     let pool = connect()?;

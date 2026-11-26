@@ -39,6 +39,18 @@ pub struct AppState {
     icons: Arc<RwLock<HashMap<i32, Bytes>>>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("EQLS_MACHINE_TOKEN is blank; refusing to serve machine endpoints without a token")]
+pub struct BlankMachineToken;
+
+/// A blank token would match a request that sends no Authorization header.
+pub fn machine_token(raw: &str) -> Result<Arc<str>, BlankMachineToken> {
+    if raw.trim().is_empty() {
+        return Err(BlankMachineToken);
+    }
+    Ok(Arc::from(raw))
+}
+
 impl AppState {
     pub fn new(pool: PgPool, machine_token: Arc<str>) -> Self {
         Self {
@@ -152,7 +164,10 @@ async fn require_machine_token(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or_default();
-    if !constant_time_eq(presented.as_bytes(), state.machine_token.as_bytes()) {
+    if presented.is_empty()
+        || state.machine_token.trim().is_empty()
+        || !constant_time_eq(presented.as_bytes(), state.machine_token.as_bytes())
+    {
         return Err(AppError::Unauthorized);
     }
     Ok(next.run(request).await)
@@ -2064,6 +2079,47 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(status_of(request).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn a_blank_machine_token_is_refused_at_startup() {
+        for blank in ["", " ", "\t\n"] {
+            assert!(machine_token(blank).is_err(), "{blank:?}");
+        }
+        assert_eq!(&*machine_token("s3cret").unwrap(), "s3cret");
+    }
+
+    #[tokio::test]
+    async fn a_blank_machine_token_lets_no_request_through() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://nobody:nobody@127.0.0.1:1/nothing")
+            .unwrap();
+        for blank in ["", " "] {
+            let app = router(
+                AppState::new(pool.clone(), Arc::from(blank)),
+                PathBuf::from("web/build"),
+            );
+            for authorization in [None, Some("Bearer "), Some("Bearer  ")] {
+                let mut request = Request::builder()
+                    .uri("/api/v1/devices")
+                    .header("content-type", "application/json");
+                if let Some(value) = authorization {
+                    request = request.header("authorization", value);
+                }
+                let status = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status();
+                assert_eq!(
+                    status,
+                    StatusCode::UNAUTHORIZED,
+                    "token {blank:?}, header {authorization:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
