@@ -1,4 +1,5 @@
-FROM rust:1.96-slim AS builder
+FROM rust:1.96-alpine AS builder
+RUN apk add --no-cache musl-dev
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -14,11 +15,11 @@ RUN /vendor/eql-log-reader/apply.sh /src \
     && cp /src/eql_*.py /src/eql_*.json.gz /src/LICENSE /out/ \
     && rm /out/eql_*_build.py
 
-FROM debian:trixie-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates python3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 1000 --user-group eqld
+FROM alpine:3.24
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates python3 \
+    && addgroup -S -g 1000 eqld \
+    && adduser -S -D -H -u 1000 -G eqld eqld
 COPY --from=builder /build/target/release/eqld /usr/local/bin/eqld
 COPY --from=log-reader /out /opt/eql-log-reader
 USER 1000:1000
