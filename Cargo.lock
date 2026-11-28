@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "eql-core"
-version = "0.25.7"
+version = "0.25.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "eqld"
-version = "0.25.7"
+version = "0.25.8"
 dependencies = [
  "axum",
  "dirs",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "eqls"
-version = "0.25.7"
+version = "0.25.8"
 dependencies = [
  "axum",
  "eql-core",
